@@ -42,7 +42,7 @@ We trained Cosmos Policy on four LIBERO task suites altogether in one run: LIBER
 To start evaluations with this checkpoint, run the command below, where `task_suite_name` is one of the following: `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`. Each will automatically download the checkpoint above. You can set the `TRANSFORMERS_CACHE` and `HF_HOME` environment variable to change where the checkpoint files get cached.
 
 ```bash
-uv run --extra cu128 --group libero --python 3.10 \
+HF_HOME=/media/czl/sata/franka_my_code/cosmos-policy/hf_cache uv run --extra cu128 --group libero --python 3.10 \
   python -m cosmos_policy.experiments.robot.libero.run_libero_eval \
     --config cosmos_predict2_2b_480p_libero__inference_only \
     --ckpt_path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \
@@ -71,7 +71,8 @@ uv run --extra cu128 --group libero --python 3.10 \
     --flip_images True \
     --num_denoising_steps_action 5 \
     --num_denoising_steps_future_state 1 \
-    --num_denoising_steps_value 1
+    --num_denoising_steps_value 1 \
+    --num_trials_per_task 5
 ```
 
 Notes:
