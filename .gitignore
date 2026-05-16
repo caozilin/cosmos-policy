@@ -1,2 +1,55 @@
+# --- 项目原有 ---
 /.cuda-name
 /build
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+# --- 虚拟环境 / 包管理 ---
+.venv/
+venv/
+.env
+.env.*
+
+# --- Hugging Face 本地缓存（LIBERO.md 里 HF_HOME 指向此处）---
+hf_cache/
+.locks/
+
+# --- HF xet 传输日志 ---
+xet/
+
+# --- 评测输出（代码里默认写到这些路径）---
+rollouts/
+cosmos_policy/experiments/robot/**/logs/
+cosmos_policy/experiments/robot/**/json_logs/
+
+# --- 训练 / 实验常见产物（预防性）---
+wandb/
+outputs/
+checkpoints/
+*.ckpt
+*.pt
+!**/config.json
+
+# --- IDE / 系统 ---
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- 测试 / 类型检查缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
