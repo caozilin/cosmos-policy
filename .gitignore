@@ -26,10 +26,16 @@ hf_cache/
 # --- HF xet 传输日志 ---
 xet/
 
-# --- 评测输出（代码里默认写到这些路径）---
+# --- 评测 / 验证输出 ---
 rollouts/
+validation_outputs/
 cosmos_policy/experiments/robot/**/logs/
 cosmos_policy/experiments/robot/**/json_logs/
+
+# --- VLA4Desk / Franka 本地数据（HDF5、T5 pkl 体积大，勿入库）---
+/datasets/
+*.hdf5
+**/t5_embeddings.pkl
 
 # --- 训练 / 实验常见产物（预防性）---
 wandb/

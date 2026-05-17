@@ -29,23 +29,45 @@ class CosmosT5TextEncoder(torch.nn.Module):
     """Handles T5 text encoding operations."""
 
     def __init__(
-        self, model_name: str = "google-t5/t5-11b", device: str = "cuda", cache_dir=None, local_files_only=False
+        self,
+        model_name: str = "google-t5/t5-11b",
+        device: str = "cuda",
+        cache_dir=None,
+        local_files_only=False,
+        max_gpu_mem_gib: Optional[float] = None,
     ):
         """Initializes the T5 tokenizer and encoder.
 
         Args:
             model_name: The name of the T5 model to use.
-            device: The device to use for computations.
+            device: ``cuda``, ``cpu``, or ``auto`` (GPU+CPU offload via device_map).
+            max_gpu_mem_gib: When device is ``auto``, cap GPU memory (GiB) and offload the rest to CPU.
         """
         super().__init__()
         self.tokenizer = T5TokenizerFast.from_pretrained(
             model_name, cache_dir=cache_dir, local_files_only=local_files_only
         )
-        self.text_encoder = T5EncoderModel.from_pretrained(
-            model_name, cache_dir=cache_dir, local_files_only=local_files_only
-        ).to(device)
+        load_kwargs = dict(
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+            torch_dtype=torch.bfloat16,
+            # Local cache has pytorch_model.bin only; avoid re-downloading ~45G safetensors.
+            use_safetensors=False,
+        )
+        self._uses_device_map = False
+        if device == "auto":
+            if max_gpu_mem_gib is None:
+                max_gpu_mem_gib = 12.0
+            max_memory = {0: f"{max_gpu_mem_gib}GiB", "cpu": "128GiB"}
+            self.text_encoder = T5EncoderModel.from_pretrained(
+                model_name, device_map="auto", max_memory=max_memory, **load_kwargs
+            )
+            self._uses_device_map = True
+            self.device = next(self.text_encoder.parameters()).device
+        else:
+            self.text_encoder = T5EncoderModel.from_pretrained(model_name, **load_kwargs).to(device)
+            self.device = device
         self.text_encoder.eval()
-        self.device = device
 
     @torch.inference_mode()
     def encode_prompts(
@@ -96,8 +118,9 @@ class CosmosT5TextEncoder(torch.nn.Module):
             return_offsets_mapping=False,
         )
 
-        input_ids = batch_encoding.input_ids.to(self.device)
-        attn_mask = batch_encoding.attention_mask.to(self.device)
+        input_device = self.device if not self._uses_device_map else next(self.text_encoder.parameters()).device
+        input_ids = batch_encoding.input_ids.to(input_device)
+        attn_mask = batch_encoding.attention_mask.to(input_device)
 
         outputs = self.text_encoder(input_ids=input_ids, attention_mask=attn_mask)
 
@@ -139,6 +162,7 @@ def get_text_embedding(
     cache_dir: str = None,
     local_files_only: str = False,
     text_encoder_class: str = "T5",
+    max_gpu_mem_gib: Optional[float] = None,
 ) -> torch.Tensor:
     """Encodes text prompts into T5 embeddings.
 
@@ -159,10 +183,17 @@ def get_text_embedding(
 
     if encoder is None:
         if cosmos_encoder is None:
-            cosmos_encoder = CosmosT5TextEncoder(device=device, cache_dir=cache_dir, local_files_only=local_files_only)
+            cosmos_encoder = CosmosT5TextEncoder(
+                device=device,
+                cache_dir=cache_dir,
+                local_files_only=local_files_only,
+                max_gpu_mem_gib=max_gpu_mem_gib,
+            )
         encoder = cosmos_encoder
 
-    encoder.text_encoder.to(device)
+    if not encoder._uses_device_map:
+        encoder.text_encoder.to(device)
+        encoder.device = torch.device(device) if isinstance(device, str) else device
 
     if isinstance(prompts, str):
         prompts = [prompts]

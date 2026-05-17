@@ -19,7 +19,7 @@ Shared utilities for precomputing and visualizing T5 text embeddings.
 
 import os
 import pickle
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 from tqdm import tqdm
@@ -27,7 +27,11 @@ from tqdm import tqdm
 from cosmos_policy._src.predict2.inference.get_t5_emb import get_text_embedding
 
 
-def generate_t5_embeddings(unique_commands: List[str]) -> Dict[str, torch.Tensor]:
+def generate_t5_embeddings(
+    unique_commands: List[str],
+    device: str = "cuda",
+    max_gpu_mem_gib: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
     """
     Generate T5 text embeddings for a list of commands.
 
@@ -40,7 +44,9 @@ def generate_t5_embeddings(unique_commands: List[str]) -> Dict[str, torch.Tensor
     t5_text_embeddings = dict()
     print("Getting text embeddings...")
     for command in tqdm(unique_commands):
-        embedding = get_text_embedding(command).to(dtype=torch.bfloat16).cpu()  # (1, 512, 1024)
+        embedding = get_text_embedding(
+            command, device=device, max_gpu_mem_gib=max_gpu_mem_gib
+        ).to(dtype=torch.bfloat16).cpu()  # (1, 512, 1024)
         t5_text_embeddings[command] = embedding
     return t5_text_embeddings
 
