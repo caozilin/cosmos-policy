@@ -5,10 +5,10 @@ Precompute T5-11B text embeddings from a prompts file (one prompt per line).
 Requires project env from ``uv sync --extra cu128 --python 3.10`` (see FRANKA.md).
 
 Usage (from project root, after ``source .venv/bin/activate``):
-    HF_HUB_CACHE=./hf_cache HF_HUB_OFFLINE=1 \\
-      python scripts/precompute_t5_embeddings.py --gpu 0 --device auto --max_gpu_mem_gib 12
-    HF_HUB_CACHE=./hf_cache HF_HUB_OFFLINE=1 \\
-      python scripts/precompute_t5_embeddings.py --gpu '' --device cpu
+    export HF_HUB_CACHE=./hf_cache HF_HUB_OFFLINE=1
+    python scripts/precompute_t5_embeddings.py --gpu 0 --device cuda \\
+      --hf-hub-cache ./hf_cache --local-files-only \\
+      -i ./vla4desk/prompts.txt -o ./datasets/.../t5_embeddings.pkl
 """
 
 from __future__ import annotations
@@ -87,6 +87,24 @@ def parse_args() -> argparse.Namespace:
         default=12.0,
         help="When --device auto, max GPU memory in GiB",
     )
+    parser.add_argument(
+        "--hf-hub-cache",
+        type=str,
+        default=None,
+        help="HF hub cache dir (default: HF_HUB_CACHE env or ./hf_cache)",
+    )
+    parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Do not download; require model in cache (also set by HF_HUB_OFFLINE=1)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        choices=["bf16", "fp32", "float32"],
+        default="bf16",
+        help="T5 weight dtype when loading (default: bf16). fp32 uses more VRAM/RAM.",
+    )
     return parser.parse_args()
 
 
@@ -105,13 +123,28 @@ def main() -> None:
     prompts = load_prompts(args.input)
     print(f"Loaded {len(prompts)} unique prompts from {args.input}")
     print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '(all visible)')}")
+    hf_cache = args.hf_hub_cache or os.environ.get("HF_HUB_CACHE") or os.path.join(_PROJECT_ROOT, "hf_cache")
+    hf_cache = os.path.abspath(os.path.expanduser(hf_cache))
+    os.environ.setdefault("HF_HUB_CACHE", hf_cache)
+    local_files_only = args.local_files_only or os.environ.get("HF_HUB_OFFLINE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     print(
         f"device={args.device}"
         + (f", max_gpu_mem_gib={args.max_gpu_mem_gib}" if args.device == "auto" else "")
+        + f", HF_HUB_CACHE={hf_cache}, local_files_only={local_files_only}"
+        + f", dtype={args.dtype}"
     )
 
     t5_text_embeddings = generate_t5_embeddings(
-        prompts, device=args.device, max_gpu_mem_gib=args.max_gpu_mem_gib
+        prompts,
+        device=args.device,
+        max_gpu_mem_gib=args.max_gpu_mem_gib,
+        cache_dir=hf_cache,
+        local_files_only=local_files_only,
+        dtype=args.dtype,
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)

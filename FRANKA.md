@@ -4,9 +4,9 @@
 
 ## 系统环境
 
-- GPU: RTX 3090 (24GB VRAM)
+- GPU: RTX 3090 (24GB VRAM) 或云端 4090 等；16G 卡需 T5 CPU/offload
 - 主模型: Cosmos Policy Predict2-2B（推理 ~6-9GB）
-- 文本编码器: T5-11B（仅预处理用，~22GB bf16）
+- 文本编码器: T5-11B **Encoder**（仅预处理；`bf16` 约 **10–12GB** 显存；`fp32` 约 **20–22GB**）
 
 ## 安装
 
@@ -96,6 +96,25 @@ python scripts/extract_vla4desk_prompts.py -o ./vla4desk/prompts.txt
 - 转换脚本 `convert_vla4desk_to_libero_hdf5.py` 也会在输出目录生成 `prompts.txt`；本工具适合**转换前**从原始采集数据扫一遍，或与转换结果交叉核对。
 - 同一 `prompt` 在多个 episode 里重复出现时只保留一条；`task_name` 取首次出现的 episode 所在任务目录名。
 
+### 从 eval `telemetry.jsonl` 提取 / 合并 prompt
+
+`scripts/extract_eval_prompts.py` 递归扫描 eval 目录下所有 `telemetry.jsonl`（如 `.../eval/unseen/abstract_ins/epo_10/telemetry.jsonl`），读取每行 JSON 的 `prompt` 字段并去重。
+
+```bash
+# 仅 eval → vla4desk/prompts.txt
+python scripts/extract_eval_prompts.py \
+  --eval-root /home/czl/桌面/毕设/结题报告/素材/eval \
+  -o ./vla4desk/prompts.txt
+
+# 采集 135 条 + eval 新增，合并去重（推荐，当前仓库 prompts.txt 约 210 条）
+python scripts/extract_eval_prompts.py \
+  --merge-committed-prompts \
+  --eval-root /home/czl/桌面/毕设/结题报告/素材/eval \
+  -o ./vla4desk/prompts.txt
+```
+
+`--merge-committed-prompts` 会先并入 git 中原来的 `vla4desk/prompts.txt`（采集数据 135 条），再追加 eval 里尚未出现的 prompt。也可用 `--merge-from other.txt` 指定其它列表。
+
 ## 转换为 LIBERO 格式 HDF5
 
 采集目录为 `vla4desk/collected/<task>/epo_*/`（`cam1.mp4`、`cam2.mp4`、`data.json`）。用 `scripts/convert_vla4desk_to_libero_hdf5.py` 转为 Cosmos Policy `LIBERODataset` 可读的演示 HDF5（字段与 [LIBERO.md](LIBERO.md) 一致）。
@@ -158,29 +177,52 @@ python scripts/precompute_t5_embeddings.py \
   -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
 ```
 
-T5 权重目录：`hf_cache/models--google-t5--t5-11b/`。预计算时须设 **`HF_HUB_CACHE`** 指向该 `hf_cache` 根目录（不要只设 `HF_HOME`，否则 `from_pretrained` 可能找不到权重）。权重已齐全时可设 `HF_HUB_OFFLINE=1`。
+T5 权重目录：`hf_cache/models--google-t5--t5-11b/snapshots/<hash>/`（需含 `spiece.model`、`tokenizer.json`、`pytorch_model.bin`）。
+
+**必须**设 **`HF_HUB_CACHE`** 指向 `hf_cache` 根目录（不要只设 `HF_HOME`）。缓存齐全时设 `HF_HUB_OFFLINE=1`，避免误从网络下载 `spiece.model`。
+
+**常见问题：**
+
+- `TypeError: not a string`（加载 tokenizer）：未设 `HF_HUB_CACHE`，或缓存不完整。
+- 进度条 `0/135` 很久不动、GPU 空：正在从磁盘读 ~43G 权重到 CPU；第一次完成后会变为 `1/135`。
+- `snapshots/` 下有空目录（无 `spiece.model`）：删除空 snapshot，只保留完整 hash 目录。
 
 ```bash
 source .venv/bin/activate
 export HF_HUB_CACHE=/path/to/cosmos-policy/hf_cache
-export HF_HUB_OFFLINE=1   # 可选，离线且缓存完整时
+export HF_HUB_OFFLINE=1
+
+# 推荐：24G+ / 4090，整 Encoder 上 GPU（bf16，默认）
+python scripts/precompute_t5_embeddings.py \
+  --gpu 0 --device cuda \
+  --hf-hub-cache "$HF_HUB_CACHE" --local-files-only \
+  -i ./vla4desk/prompts.txt \
+  -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
 
 # 16G 显存：GPU 限 12G + CPU offload
 python scripts/precompute_t5_embeddings.py --gpu 0 --device auto --max_gpu_mem_gib 12
+
+# fp32 加载（更占显存；输出 pkl 仍为 bf16）
+python scripts/precompute_t5_embeddings.py --gpu 0 --device cuda --dtype fp32
 
 # 纯 CPU（不占显存，较慢）
 python scripts/precompute_t5_embeddings.py --gpu '' --device cpu
 ```
 
+脚本参数：`--hf-hub-cache`、`--local-files-only`、`--dtype {bf16,fp32}`（默认 `bf16`）。
+
 也可用 `uv run`（无需手动 activate）：
 
 ```bash
 export HF_HUB_CACHE=/path/to/cosmos-policy/hf_cache
+export HF_HUB_OFFLINE=1
 uv run --extra cu128 --python 3.10 python scripts/precompute_t5_embeddings.py \
-  --gpu 0 --device auto --max_gpu_mem_gib 12
+  --gpu 0 --device cuda --hf-hub-cache "$HF_HUB_CACHE" --local-files-only \
+  -i ./vla4desk/prompts.txt \
+  -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
 ```
 
-> T5-11B bf16 整模约 22GB VRAM，16G 卡请用 `--device auto` 或 `--device cpu`。
+> 预计算使用 `T5EncoderModel`（仅 Encoder）。`bf16` 显存约 **10–12GB**；磁盘 `pytorch_model.bin` 为 fp32（~43G），读入时 **CPU 内存** 仍可能暂时很高，不等于 45G 全在 GPU 上。
 
 ## 离线验证（可选，非训练必须）
 

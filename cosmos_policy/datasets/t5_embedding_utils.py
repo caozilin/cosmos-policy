@@ -31,6 +31,9 @@ def generate_t5_embeddings(
     unique_commands: List[str],
     device: str = "cuda",
     max_gpu_mem_gib: Optional[float] = None,
+    cache_dir: Optional[str] = None,
+    local_files_only: Optional[bool] = None,
+    dtype: str = "bf16",
 ) -> Dict[str, torch.Tensor]:
     """
     Generate T5 text embeddings for a list of commands.
@@ -45,8 +48,13 @@ def generate_t5_embeddings(
     print("Getting text embeddings...")
     for command in tqdm(unique_commands):
         embedding = get_text_embedding(
-            command, device=device, max_gpu_mem_gib=max_gpu_mem_gib
-        ).to(dtype=torch.bfloat16).cpu()  # (1, 512, 1024)
+            command,
+            device=device,
+            max_gpu_mem_gib=max_gpu_mem_gib,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+            dtype=dtype,
+        ).to(dtype=torch.bfloat16).cpu()  # (1, 512, 1024); pkl stays bf16 for training
         t5_text_embeddings[command] = embedding
     return t5_text_embeddings
 

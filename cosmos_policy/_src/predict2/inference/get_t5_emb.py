@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
+import os
 from typing import ClassVar, List, Optional, Tuple, Union
 
 import attrs
@@ -23,6 +25,62 @@ from transformers import T5EncoderModel, T5TokenizerFast
 transformers.logging.set_verbosity_error()
 
 T5_MODEL_DIR = "checkpoints/google-t5/t5-11b"
+T5_HF_REPO = "google-t5/t5-11b"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+_DEFAULT_HF_HUB_CACHE = os.path.join(_REPO_ROOT, "hf_cache")
+
+
+def resolve_hf_hub_cache(cache_dir: Optional[str] = None) -> Optional[str]:
+    """Resolve Hugging Face hub cache (``HF_HUB_CACHE`` or repo ``hf_cache/``)."""
+    if cache_dir:
+        return os.path.abspath(os.path.expanduser(cache_dir))
+    env_cache = os.environ.get("HF_HUB_CACHE")
+    if env_cache:
+        return os.path.abspath(os.path.expanduser(env_cache))
+    if os.path.isdir(_DEFAULT_HF_HUB_CACHE):
+        return _DEFAULT_HF_HUB_CACHE
+    return None
+
+
+def assert_t5_hub_cache(cache_dir: str, model_name: str = T5_HF_REPO) -> None:
+    """Fail fast if tokenizer / weights are missing from the local HF cache."""
+    repo_slug = model_name.replace("/", "--")
+    snapshots = os.path.join(cache_dir, f"models--{repo_slug}", "snapshots")
+    if not os.path.isdir(snapshots):
+        raise FileNotFoundError(
+            f"T5 cache not found under {snapshots}. Set HF_HUB_CACHE to your hf_cache root "
+            f"(see FRANKA.md) or download {model_name} into that directory."
+        )
+
+    def _has_file(name: str) -> bool:
+        for path in glob.glob(os.path.join(snapshots, "*", name)):
+            if os.path.isfile(os.path.realpath(path)):
+                return True
+        return False
+
+    missing = [n for n in ("spiece.model", "tokenizer.json", "pytorch_model.bin") if not _has_file(n)]
+    if missing:
+        raise FileNotFoundError(
+            f"Incomplete T5 cache at {snapshots}: missing {missing}. "
+            f"Copy the full hf_cache/models--{repo_slug} tree from a machine that already has T5-11B, "
+            f"or run: huggingface-cli download {model_name} --cache-dir {cache_dir}"
+        )
+
+
+def default_local_files_only(local_files_only: Optional[bool] = None) -> bool:
+    if local_files_only is not None:
+        return local_files_only
+    return os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes")
+
+
+def resolve_torch_dtype(dtype: Optional[str] = "bf16") -> torch.dtype:
+    """Map user-facing dtype name to ``torch.dtype`` for ``from_pretrained``."""
+    if dtype is None or dtype in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if dtype in ("fp32", "float32", "fp16", "float16", "32", "16"):
+        name = {"fp32": "float32", "32": "float32", "fp16": "float16", "16": "float16"}.get(dtype, dtype)
+        return getattr(torch, name)
+    raise ValueError(f"Unsupported T5 load dtype: {dtype!r}. Use bf16 or fp32.")
 
 
 class CosmosT5TextEncoder(torch.nn.Module):
@@ -35,6 +93,7 @@ class CosmosT5TextEncoder(torch.nn.Module):
         cache_dir=None,
         local_files_only=False,
         max_gpu_mem_gib: Optional[float] = None,
+        dtype: str = "bf16",
     ):
         """Initializes the T5 tokenizer and encoder.
 
@@ -42,15 +101,25 @@ class CosmosT5TextEncoder(torch.nn.Module):
             model_name: The name of the T5 model to use.
             device: ``cuda``, ``cpu``, or ``auto`` (GPU+CPU offload via device_map).
             max_gpu_mem_gib: When device is ``auto``, cap GPU memory (GiB) and offload the rest to CPU.
+            dtype: Weight/compute dtype: ``bf16`` (default) or ``fp32`` / ``float32``.
         """
         super().__init__()
+        self.torch_dtype = resolve_torch_dtype(dtype)
+        cache_dir = resolve_hf_hub_cache(cache_dir)
+        local_files_only = default_local_files_only(local_files_only)
+        if cache_dir is not None:
+            assert_t5_hub_cache(cache_dir, model_name=model_name)
+            print(
+                f"Using HF hub cache: {cache_dir} "
+                f"(local_files_only={local_files_only}, dtype={self.torch_dtype})"
+            )
         self.tokenizer = T5TokenizerFast.from_pretrained(
             model_name, cache_dir=cache_dir, local_files_only=local_files_only
         )
         load_kwargs = dict(
             cache_dir=cache_dir,
             local_files_only=local_files_only,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=self.torch_dtype,
             # Local cache has pytorch_model.bin only; avoid re-downloading ~45G safetensors.
             use_safetensors=False,
         )
@@ -159,10 +228,11 @@ def get_text_embedding(
     device: str = "cuda",
     max_length: int = 512,
     return_mask: bool = False,
-    cache_dir: str = None,
-    local_files_only: str = False,
+    cache_dir: Optional[str] = None,
+    local_files_only: Optional[bool] = None,
     text_encoder_class: str = "T5",
     max_gpu_mem_gib: Optional[float] = None,
+    dtype: str = "bf16",
 ) -> torch.Tensor:
     """Encodes text prompts into T5 embeddings.
 
@@ -180,14 +250,16 @@ def get_text_embedding(
     assert text_encoder_class == "T5", f"text_encoder_class {text_encoder_class} is not supported"
 
     global cosmos_encoder
+    torch_dtype = resolve_torch_dtype(dtype)
 
     if encoder is None:
-        if cosmos_encoder is None:
+        if cosmos_encoder is None or cosmos_encoder.torch_dtype != torch_dtype:
             cosmos_encoder = CosmosT5TextEncoder(
                 device=device,
                 cache_dir=cache_dir,
                 local_files_only=local_files_only,
                 max_gpu_mem_gib=max_gpu_mem_gib,
+                dtype=dtype,
             )
         encoder = cosmos_encoder
 
