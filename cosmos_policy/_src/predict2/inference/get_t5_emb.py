@@ -26,7 +26,7 @@ transformers.logging.set_verbosity_error()
 
 T5_MODEL_DIR = "checkpoints/google-t5/t5-11b"
 T5_HF_REPO = "google-t5/t5-11b"
-# Encoder-only export from scripts/export_t5_encoder_only.py (under HF_HUB_CACHE root)
+# Optional encoder-only weights under HF_HUB_CACHE (hf_cache/t5-11b-encoder/)
 T5_ENCODER_SUBDIR = "t5-11b-encoder"
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 _DEFAULT_HF_HUB_CACHE = os.path.join(_REPO_ROOT, "hf_cache")
@@ -70,8 +70,9 @@ def assert_t5_encoder_only(cache_dir: str) -> None:
     path = resolve_t5_encoder_only(cache_dir)
     if path is None:
         raise FileNotFoundError(
-            f"Encoder-only weights not found at {t5_encoder_only_dir(cache_dir)}. "
-            f"Run: python scripts/export_t5_encoder_only.py"
+            f"Incomplete encoder-only weights at {t5_encoder_only_dir(cache_dir)}. "
+            "Provide pytorch_model.bin, config.json, spiece.model, tokenizer.json, "
+            "or remove that directory to load the full google-t5/t5-11b snapshot instead."
         )
     missing = [
         n

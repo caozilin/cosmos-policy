@@ -184,16 +184,7 @@ python scripts/precompute_t5_embeddings.py \
 
 T5 权重目录：`hf_cache/models--google-t5--t5-11b/snapshots/<hash>/`（需含 `spiece.model`、`tokenizer.json`、`pytorch_model.bin`）。
 
-**可选 — encoder-only 轻量包（推荐，降低读盘时 CPU 峰值）：** 从整包一次性导出后，预计算会自动用 `hf_cache/t5-11b-encoder/`（约 22G fp32 / 11G bf16），无需改 precompute 命令：
-
-```bash
-export HF_HUB_CACHE=/path/to/cosmos-policy/hf_cache
-export HF_HUB_OFFLINE=1
-python scripts/export_t5_encoder_only.py          # 默认 fp32，仅需运行一次
-# python scripts/export_t5_encoder_only.py --dtype bf16   # 更小文件
-```
-
-**必须**设 **`HF_HUB_CACHE`** 指向 `hf_cache` 根目录（不要只设 `HF_HOME`）。缓存齐全时设 `HF_HUB_OFFLINE=1`，避免误从网络下载 `spiece.model`。
+**必须**设 **`HF_HUB_CACHE`** 指向仓库内 `hf_cache` 根目录（不要只设 `HF_HOME`）。在仓库根目录下可用 `export HF_HUB_CACHE=./hf_cache`。缓存齐全时设 `HF_HUB_OFFLINE=1`，避免误从网络下载 `spiece.model`。
 
 **常见问题：**
 

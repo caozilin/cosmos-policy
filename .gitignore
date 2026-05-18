@@ -21,7 +21,7 @@ venv/
 
 # --- Hugging Face 本地缓存（默认 <repo>/hf_cache，见 output_paths.py）---
 hf_cache/
-# Encoder-only export (~22G fp32); regenerate with scripts/export_t5_encoder_only.py
+# Optional manual encoder-only T5 export (~22G fp32)
 hf_cache/t5-11b-encoder/
 .locks/
 
