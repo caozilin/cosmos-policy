@@ -1,297 +1,180 @@
 # VLA4Desk: Franka 真机数据训练
 
-与上游环境说明一致，请以 [SETUP.md](SETUP.md)、[README.md](README.md) 为准。本文只补充 Franka / VLA4Desk 相关路径与命令。
+在 [SETUP.md](SETUP.md)、[README.md](README.md) 环境说明基础上，本文说明如何用 **VLA4Desk 采集格式** 的数据微调 Cosmos Policy（LIBERO 预训练 → Franka 演示）。
 
-## 系统环境
+## 推荐流程
 
-- GPU: RTX 3090 (24GB VRAM) 或云端 4090 等；16G 卡需 T5 CPU/offload
-- 主模型: Cosmos Policy Predict2-2B（推理 ~6-9GB）
-- 文本编码器: T5-11B **Encoder**（仅预处理；默认 **`fp32`** 约 **20–22GB** 显存；`bf16` 约 **10–12GB**）
+1. **安装**：`uv sync --extra cu128 --python 3.10`（真机训练**不需要** `--group libero`）
+2. **放置数据**：自建 `vla4desk/collected/<task>/epo_*/`（仓库内无此目录，见下文）
+3. **转 HDF5**：`scripts/convert_vla4desk_to_libero_hdf5.py`
+4. **离线预计算 T5**（约 45GB 权重 + ~22GB 显存）：`precompute_t5_embeddings.py` → `t5_embeddings.pkl`
+5. **训练**：实验名 `cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora`（LoRA，推荐）
+
+路径默认相对**仓库根目录**（`cosmos_policy/config/output_paths.py` 会设置 `HF_HOME`、`BASE_DATASETS_DIR`、`checkpoints/` 等，一般无需再写绝对路径）。
+
+## 仓库内目录
+
+**Git 里实际只有** `vla4desk/prompts.txt`（`.gitignore` 规则：`vla4desk/*` 但保留 `*.txt`）。下面带 ※ 的目录/文件需**自行准备**，clone 后默认不存在，也不会被提交。
+
+```text
+cosmos-policy/
+  vla4desk/
+    prompts.txt          # [git] 语言指令示例列表
+    collected/           # [本地 ※] 真机原始采集，按 task/epo_* 放置
+    eval/                # [本地 ※] 可选；仅在使用 extract_eval_prompts 合并 eval prompt 时需要
+  datasets/.../vla4desk_franka/   # [本地 ※] convert 脚本生成
+  hf_cache/              # [本地 ※] T5-11b 等权重（约 45GB）
+  checkpoints/           # [本地 ※] 训练输出
+```
+
+## 环境要求
+
+| 组件 | 说明 |
+|------|------|
+| GPU | 训练 LoRA：建议 ≥24GB/卡；单卡 16GB 需减小 batch 并加大梯度累积 |
+| 主模型 | Cosmos Policy Predict2-2B |
+| T5-11B（整包） | 磁盘约 **45GB**；预计算时 Encoder 上 GPU 约 **22GB** 显存（`fp32`），`bf16` 约 10–12GB |
+| 训练阶段 | **不加载** T5，只读离线 `t5_embeddings.pkl`（须提前 precompute） |
 
 ## 安装
 
-**不要**使用 `pip install -e ".[cu128]"`、`python3 -m venv`（系统默认可能是 3.13）、也不要把本机 `.venv` rsync 到另一台机器。应使用 **`uv sync --extra cu128 --python 3.10`**（与 [LIBERO.md](LIBERO.md) 相同，但 Franka 工作**不需要** `--group libero`）。
-
-### 方式一：Docker（推荐，与 SETUP.md 一致）
-
-构建与启动见 [SETUP.md](SETUP.md)。进入容器后，在项目根目录执行：
+使用 **`uv sync --extra cu128 --python 3.10`**，不要用系统 `pip install -e` 或 Python 3.13 自建 venv。
 
 ```bash
+cd <仓库根目录>
 uv sync --extra cu128 --python 3.10
 source .venv/bin/activate
+python -V   # 应为 3.10.x
 ```
 
-若 `vla4desk` 数据在仓库外，启动容器时额外挂载父目录（示例）：
+- **Docker**：见 [SETUP.md](SETUP.md)；数据在仓库外时挂载到容器内路径（如 `/data`）。
+- **LIBERO 仿真评测**：另装 `uv sync --extra cu128 --group libero --python 3.10`（见 [LIBERO.md](LIBERO.md)）。
+
+## 数据格式
+
+### 原始采集（`vla4desk/collected/`，需本地创建）
+
+将 VLA4Desk 采集结果放到 `vla4desk/collected/<task_name>/epo_*/`（路径与 `output_paths.default_vla4desk_collected_dir()` 一致）。每个 episode 含 `cam1.mp4`、`cam2.mp4`、`data.json`。`data.json` 中有 `prompt`、`task_name`、逐帧 `state` / `action` 等。
+
+本仓库示例集（转换脚本会扫全部 task）包含例如：`banana_on_bowl`、`simple_pick_place`、`stack_blocks` 等；转换后得到**按 prompt 分文件**的 HDF5（每个唯一指令一个 `*_demo.hdf5`）。
+
+### 提取 / 合并 prompt
 
 ```bash
-docker run \
-  -u root \
-  -e HOST_USER_ID=$(id -u) \
-  -e HOST_GROUP_ID=$(id -g) \
-  -v $HOME/.cache:/home/cosmos/.cache \
-  -v $(pwd):/workspace \
-  -v /path/to/parent-of-vla4desk:/data \
-  --gpus all \
-  --ipc=host \
-  -it --rm \
-  -w /workspace \
-  --entrypoint bash \
-  cosmos-policy
-```
-
-### 方式二：宿主机（无 Docker）
-
-```bash
-cd /path/to/cosmos-policy
-
-# 若使用 conda，先退出，避免抢用 base 的 python
-conda deactivate
-
-# 安装 uv（若未安装）：https://docs.astral.sh/uv/getting-started/installation/
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 若此前用错误方式建过 venv（如 3.13 / pip），先删除再 sync
-rm -rf .venv
-
-uv sync --extra cu128 --python 3.10
-source .venv/bin/activate
-which python && python -V   # 应为 .venv/bin/python 且 3.10.x
-```
-
-需要 LIBERO 仿真评测时，才使用 `uv sync --extra cu128 --group libero --python 3.10`（见 [LIBERO.md](LIBERO.md)）。
-
-## 数据
-
-真机采集默认路径: `vla4desk/collected/`（相对仓库根；大文件不进 git）
-
-包含 12 个 task，共 135 条唯一指令:
-- `banana_on_bowl`, `banana_on_plate`
-- `pear_on_bowl`, `pear_on_cup`, `pear_on_plate`
-- `strawberry_on_bowl`, `strawberry_on_cup`, `strawberry_on_place`
-- `stack_blocks`, `simple_pick_place`
-- `fruits_in_contrainers`, `final_clean`
-
-### 提取唯一指令（prompt）
-
-`scripts/extract_vla4desk_prompts.py` 会遍历采集目录下所有 `epo_*/data.json`，汇总去重后的 `prompt`（及对应 `task_name`）。用于转换前核对语言指令、统计条数，或单独生成 `prompts.txt`。
-
-默认扫描 `<repo>/vla4desk/collected`；其它路径用 `--data-root`。
-
-```bash
-source .venv/bin/activate
-cd /path/to/cosmos-policy
-
-# 列出全部唯一 prompt（带 task 名）
+# 从 collected 汇总唯一 prompt
 python scripts/extract_vla4desk_prompts.py
-
-# 只打印 prompt 文本，一行一条
-python scripts/extract_vla4desk_prompts.py --quiet
-
-# 写入文件（每行一条，可供 precompute_t5 或人工检查）
 python scripts/extract_vla4desk_prompts.py -o ./vla4desk/prompts.txt
-```
 
-说明：
-
-- 转换脚本 `convert_vla4desk_to_libero_hdf5.py` 也会在输出目录生成 `prompts.txt`；本工具适合**转换前**从原始采集数据扫一遍，或与转换结果交叉核对。
-- 同一 `prompt` 在多个 episode 里重复出现时只保留一条；`task_name` 取首次出现的 episode 所在任务目录名。
-
-### 从 eval `telemetry.jsonl` 提取 / 合并 prompt
-
-`scripts/extract_eval_prompts.py` 递归扫描 eval 目录下所有 `telemetry.jsonl`（如 `.../eval/unseen/abstract_ins/epo_10/telemetry.jsonl`），读取每行 JSON 的 `prompt` 字段并去重。
-
-将 eval 的 `telemetry.jsonl` 树放到 `vla4desk/eval/`（或任意目录并用 `--eval-root` 指定）：
-
-```bash
-# 仅 eval → vla4desk/prompts.txt（默认 --eval-root ./vla4desk/eval）
+# 可选：从 eval telemetry 合并（须先有目录 vla4desk/eval/.../telemetry.jsonl）
 python scripts/extract_eval_prompts.py -o ./vla4desk/prompts.txt
-
-# 采集 135 条 + eval 新增，合并去重
 python scripts/extract_eval_prompts.py --merge-committed-prompts -o ./vla4desk/prompts.txt
 ```
 
-`--merge-committed-prompts` 会先并入 git 中原来的 `vla4desk/prompts.txt`（采集数据 135 条），再追加 eval 里尚未出现的 prompt。也可用 `--merge-from other.txt` 指定其它列表。
+没有 eval 数据时可跳过；`--eval-root` 也可指向任意目录。
 
-## 转换为 LIBERO 格式 HDF5
+## 转换为 LIBERO 风格 HDF5
 
-采集目录为 `vla4desk/collected/<task>/epo_*/`（`cam1.mp4`、`cam2.mp4`、`data.json`）。用 `scripts/convert_vla4desk_to_libero_hdf5.py` 转为 Cosmos Policy `LIBERODataset` 可读的演示 HDF5（字段与 [LIBERO.md](LIBERO.md) 一致）。
+```bash
+python scripts/convert_vla4desk_to_libero_hdf5.py --suite-name vla4desk_franka
+```
 
-**约定（与 OpenPI `convert_vla4desk_data_to_lerobot.py` 一致）：**
+默认 `--input ./vla4desk/collected`，`--output ./datasets/VLA4Desk-Franka/success_only`。
 
-- `action`：按 `data.json` **原样**写入，不除以 `action_scale`
-- 帧：与 JSON / 视频 **逐帧对齐**，不删静止帧
-- 语言：`prompt` 写入文件名（`put_the_banana_in_the_red_bowl_demo.hdf5`）及 HDF5 属性 `task_description`；`LIBERODataset` 仍从文件名解析 `command`
+**与 OpenPI 转换约定一致**：`action` 按 `data.json` 原样写入；帧与视频逐帧对齐；`prompt` 进入文件名与 HDF5 属性 `task_description`。
 
-**输出目录示例：**
+**输出示例：**
 
 ```text
 datasets/VLA4Desk-Franka/success_only/vla4desk_franka/
   put_the_banana_in_the_red_bowl_demo.hdf5
   prompts.txt
-  t5_embeddings.pkl          # 若源 pkl 里已有对应 prompt 则自动写入子集
+  t5_embeddings.pkl
   conversion_manifest.json
 ```
 
-**转换命令：**
+**常用选项：**
 
 ```bash
-source .venv/bin/activate
-cd /path/to/cosmos-policy
+# 256 + JPEG（省空间，与 LIBERO regen 一致）
+python scripts/convert_vla4desk_to_libero_hdf5.py --suite-name vla4desk_franka --resize 256 --jpeg-compress
 
-python scripts/convert_vla4desk_to_libero_hdf5.py \
-  --suite-name vla4desk_franka
+# 跳过 T5 pkl 复制（之后单独 precompute）
+python scripts/convert_vla4desk_to_libero_hdf5.py --suite-name vla4desk_franka --skip-t5
 ```
 
-（`--input` / `--output` 默认分别为 `vla4desk/collected` 与 `datasets/VLA4Desk-Franka/success_only`。）
+转换过程**不加载** T5 模型；耗时主要在读 MP4、resize 与写 HDF5。
+
+## T5 embedding 预计算（离线一步，训练前完成）
+
+**为何离线做 pkl：** T5-11b 整包约 **45GB** 磁盘；用 Encoder 做预计算时 GPU 显存约 **22GB**（`fp32`）。Cosmos Policy **训练/推理只读** `t5_embeddings.pkl`，不会在训练 loop 里再加载 T5。因此在一台大显存机器上跑完 `precompute_t5_embeddings.py`，把生成的 `t5_embeddings.pkl` 随 `datasets/.../vla4desk_franka/` 分发即可。
+
+先确保 `hf_cache` 中有完整 `google-t5/t5-11b`（`models--google-t5--t5-11b/snapshots/<hash>/` 含 `pytorch_model.bin`、`spiece.model`、`tokenizer.json`）。
 
 ```bash
-# 显式指定路径时：
-python scripts/convert_vla4desk_to_libero_hdf5.py \
-  --input ./vla4desk/collected \
-  --output ./datasets/VLA4Desk-Franka/success_only \
-  --suite-name vla4desk_franka
-```
+export HF_HUB_CACHE=./hf_cache
+export HF_HUB_OFFLINE=1   # 缓存齐全时使用
 
-可选参数：
-
-```bash
-# 与 LIBERO regen 一致：256 分辨率 + JPEG 压缩（省磁盘）
-python scripts/convert_vla4desk_to_libero_hdf5.py ... --resize 256 --jpeg-compress
-
-# 保留原始 640×480
-python scripts/convert_vla4desk_to_libero_hdf5.py ... --resize 0
-
-# 指定 T5 源（默认会尝试 vla4desk/t5_embeddings.pkl）
-python scripts/convert_vla4desk_to_libero_hdf5.py ... \
-  --t5-embeddings ./vla4desk/t5_embeddings.pkl
-```
-
-训练时 `data_dir` 指向 `.../success_only`，`t5_text_embeddings_path` 指向 `.../vla4desk_franka/t5_embeddings.pkl`（若该文件不存在，见下方 T5 一节先对 `prompts.txt` 预计算）。
-
-> **耗时说明**：转换**不会**加载 T5-11B 模型；慢在逐条读 MP4、默认 `resize 256`（PIL 逐帧）、以及 HDF5 的 `gzip` 压图像（135 条约需十几分钟，终端会显示 `Episodes` 进度条）。若只是复制已有 embedding，末尾 `pickle.load` 大 pkl 也可能卡几十秒。加速可加 `--jpeg-compress`，或 `--skip-t5` 跳过 pkl 复制。
-
-## T5 Embedding 预计算
-
-须先完成上方 **安装**（`uv sync`）。输入为每行一条指令的 `prompts.txt`（例如转换后目录下的 `vla4desk_franka/prompts.txt`，或仓库内 `vla4desk/prompts.txt`），输出为同目录或指定路径的 `t5_embeddings.pkl`。
-
-若转换脚本已根据已有 pkl 写出**子集** `t5_embeddings.pkl`，但仍有 prompt 缺 embedding，对完整 `prompts.txt` 再跑一遍即可覆盖/补全：
-
-```bash
 python scripts/precompute_t5_embeddings.py \
+  --gpu 0 --device cuda \
+  --hf-hub-cache "$HF_HUB_CACHE" --local-files-only \
   -i ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/prompts.txt \
   -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
 ```
 
-T5 权重目录：`hf_cache/models--google-t5--t5-11b/snapshots/<hash>/`（需含 `spiece.model`、`tokenizer.json`、`pytorch_model.bin`）。
+| 场景 | 建议 |
+|------|------|
+| 24GB+ 显存 | `--device cuda`（默认 `fp32`） |
+| 省显存 | `--dtype bf16` |
+| 16GB 显存 | `--device auto --max_gpu_mem_gib 12 --dtype bf16` |
+| 无 GPU | `--gpu '' --device cpu` |
 
-**必须**设 **`HF_HUB_CACHE`** 指向仓库内 `hf_cache` 根目录（不要只设 `HF_HOME`）。在仓库根目录下可用 `export HF_HUB_CACHE=./hf_cache`。缓存齐全时设 `HF_HUB_OFFLINE=1`，避免误从网络下载 `spiece.model`。
+**常见问题：** 未设 `HF_HUB_CACHE` 会导致 tokenizer 报错；首次加载会把约 45GB 权重读入内存/显存，进度条在 `0/N` 停留较久属正常。
 
-**常见问题：**
+## 离线验证（可选）
 
-- `TypeError: not a string`（加载 tokenizer）：未设 `HF_HUB_CACHE`，或缓存不完整。
-- 进度条 `0/135` 很久不动、GPU 空：正在从磁盘读 ~43G 权重到 CPU；第一次完成后会变为 `1/135`。
-- `snapshots/` 下有空目录（无 `spiece.model`）：删除空 snapshot，只保留完整 hash 目录。
-
-```bash
-source .venv/bin/activate
-export HF_HUB_CACHE=/path/to/cosmos-policy/hf_cache
-export HF_HUB_OFFLINE=1
-
-# 推荐：24G+ / 4090，整 Encoder 上 GPU（默认 fp32）
-python scripts/precompute_t5_embeddings.py \
-  --gpu 0 --device cuda \
-  --hf-hub-cache "$HF_HUB_CACHE" --local-files-only \
-  -i ./vla4desk/prompts.txt \
-  -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
-
-# 省显存：bf16 加载（输出 pkl 仍为 bf16）
-python scripts/precompute_t5_embeddings.py --gpu 0 --device cuda --dtype bf16
-
-# 16G 显存：GPU 限 12G + CPU offload（建议加 --dtype bf16）
-python scripts/precompute_t5_embeddings.py --gpu 0 --device auto --max_gpu_mem_gib 12 --dtype bf16
-
-# 纯 CPU（不占显存，较慢）
-python scripts/precompute_t5_embeddings.py --gpu '' --device cpu
-```
-
-脚本参数：`--hf-hub-cache`、`--local-files-only`、`--dtype {fp32,bf16}`（默认 `fp32`）。
-
-也可用 `uv run`（无需手动 activate）：
+需要 LIBERO 依赖组。用 LIBERO 预训练权重对**已转换 HDF5** 做推理对比（非训练必需）：
 
 ```bash
-export HF_HUB_CACHE=/path/to/cosmos-policy/hf_cache
-export HF_HUB_OFFLINE=1
-uv run --extra cu128 --python 3.10 python scripts/precompute_t5_embeddings.py \
-  --gpu 0 --device cuda --hf-hub-cache "$HF_HUB_CACHE" --local-files-only \
-  -i ./vla4desk/prompts.txt \
-  -o ./datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl
-```
-
-> 预计算使用 `T5EncoderModel`（仅 Encoder）。默认 `fp32` 显存约 **20–22GB**；`--dtype bf16` 约 **10–12GB**。磁盘 `pytorch_model.bin` 为整包 checkpoint（~43G），读入时 **CPU 内存** 峰值仍可能暂时很高。
-
-## 离线验证（可选，非训练必须）
-
-`scripts/validate_vla4desk_libero_inference.py`：从转换后的 HDF5 读图 / proprio / action，用 **LIBERO 预训练权重** 做若干时刻的推理。语言条件使用 HDF5 的 **`task_description`（正常提示词）**，T5 来自 **`vla4desk_franka/t5_embeddings.pkl`**（须先对 `prompts.txt` 预计算）。
-
-须安装 LIBERO 依赖（`--group libero`）。`export HF_HOME=...` 仅用于加载 LIBERO checkpoint / `libero_dataset_statistics.json`。
-
-```bash
-export HF_HOME=/path/to/cosmos-policy/hf_cache
+export HF_HOME=./hf_cache
 
 uv run --extra cu128 --group libero --python 3.10 \
   python scripts/validate_vla4desk_libero_inference.py \
-  --hdf5-path datasets/VLA4Desk-Franka/success_only/vla4desk_franka/put_the_yellow_cube_on_the_red_plate_demo.hdf5 \
-  --t5-text-embeddings-path datasets/VLA4Desk-Franka/success_only/vla4desk_franka/t5_embeddings.pkl \
-  --timestamps-json /path/to/vla4desk/collected/simple_pick_place/epo_1/data.json \
-  --output-dir ./validation_outputs/vla4desk_epo_1_hdf5
+  --output-dir ./validation_outputs/vla4desk_smoke
 ```
 
-输出：`validation_*.json`、`states_actions_*.csv`、以及 `comparisons/` 下输入图与预测 future 图的对比 PNG（默认 0–18 s、步长 2 s）。
+主要参数均有默认值（示例 HDF5、`t5_embeddings.pkl`、可选 `data.json` 时间戳侧车）。输出 JSON/CSV 与 `comparisons/` 对比图。
 
 ## 训练
 
-配置见 `cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py`。
+配置定义：`cosmos_policy/config/experiment/cosmos_policy_experiment_configs.py`。
 
 | 实验名 | 说明 |
 |--------|------|
-| **`cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora`** | **推荐**：PEFT LoRA，冻结 LIBERO 主干，只训 adapter |
-| `cosmos_predict2_2b_480p_vla4desk_franka_135_demos` | 全参数微调（显存大，8×80GB 更合适） |
+| **`cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora`** | **推荐**：LoRA 微调 LIBERO 预训练权重 |
+| `cosmos_predict2_2b_480p_vla4desk_franka_135_demos` | 全参数微调（显存需求高） |
 
-二者共同点：
+共同点：
 
-- **数据**：`LIBERODataset`，`data_dir` = `datasets/VLA4Desk-Franka/success_only/vla4desk_franka/`（135 HDF5）
-- **T5**：同目录 `t5_embeddings.pkl`
-- **归一化**：数据目录内 `dataset_statistics.json`（**勿用** `libero_dataset_statistics.json`）
-- **初始化**：`nvidia/Cosmos-Policy-LIBERO-Predict2-2B`（加载时把权重灌进 LoRA 的 `base_layer`，adapter 随机初始化）
+- 数据：`LIBERODataset`，目录 `datasets/.../vla4desk_franka/`
+- T5：`同目录/t5_embeddings.pkl`
+- 统计量：数据目录内 **`dataset_statistics.json`**（不要用 `libero_dataset_statistics.json`）
+- 初始化：`nvidia/Cosmos-Policy-LIBERO-Predict2-2B`（`.pt` 冷启动；有 DCP 断点则自动续训）
 
-LoRA 默认：`rank=32`，`alpha=32`，目标模块 `q_proj,k_proj,v_proj,output_proj,mlp.layer1,mlp.layer2`（与 `Text2WorldModelConfig` 一致）。依赖 `peft`（已在 `pyproject.toml`）。
+### 重要：不要用 `model=policy_ddp` 配 LoRA 实验
 
-### 路径与离线（可选）
+Hydra 会用 `policy_ddp` **整段替换** experiment 里的 `model`，导致 `use_lora=False`（变成全参 DDP）。若要多卡 DDP + LoRA，请用：
 
-仓库已默认：`BASE_DATASETS_DIR` / `HF_HOME` / checkpoint 输出均指向项目内路径（见 `cosmos_policy/config/output_paths.py`）。一般 **无需** 再 `export BASE_DATASETS_DIR="$(pwd)"`。
-
-离线训练（权重已在 `hf_cache/`）：
-
-```bash
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+```text
+trainer.distributed_parallelism=ddp
+model.config.fsdp_shard_size=1
 ```
 
-首次冷启动日志中应出现 `Loading consolidated pretrained weights from: ...Cosmos-Policy-LIBERO-Predict2-2B.pt`，不应是 `Training from scratch.`。
+### 多卡 LoRA 示例（8×24GB）
 
-### 8×3090 LoRA 训练（推荐配方）
-
-目标：**有效 batch ≈ 600**（非 LIBERO 论文的 1920），**每 1000 step 存盘**，**最多 30000 step**。W&B 项目名 **`cosmos-policy`**。
-
-**勿用 `model=policy_ddp` 搭配 `..._lora` 实验**：Hydra 会用 `policy_ddp` 整段替换 experiment 里的 `model`，得到默认 `use_lora=False`，等于全参数 DDP 微调（显存与 checkpoint 含义都不同）。只切 DDP 时请用 `trainer.distributed_parallelism=ddp` + `model.config.fsdp_shard_size=1`。
-
-\[
-B_{\text{eff}} = \text{batch\_per\_GPU} \times 8 \times \text{grad\_accum} = 6 \times 8 \times 12 = 576 \approx 600
-\]
+**有效 batch** = `batch_size` × GPU 数 × `grad_accum_iter`  
+本例：6 × 8 × 12 = **576**
 
 ```bash
-cd /path/to/cosmos-policy
-
 uv run --extra cu128 --python 3.10 \
   torchrun --nproc_per_node=8 --master_port=12341 -m cosmos_policy.scripts.train \
   --config=cosmos_policy/config/config.py -- \
@@ -303,48 +186,19 @@ uv run --extra cu128 --python 3.10 \
   trainer.grad_accum_iter=12 \
   trainer.max_iter=30000 \
   checkpoint.save_iter=1000 \
-  trainer.logging_iter=10 \
-  job.wandb_mode=online \
-  job.project=cosmos-policy \
-  job.group=cosmos_v2_finetune \
-  job.name=cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__8x3090_bs6_ga12 \
-  optimizer.lr=1e-4
+  optimizer.lr=1e-4 \
+  job.name=my_franka_lora_8gpu \
+  job.wandb_mode=disabled
 ```
 
-LoRA 实验默认继承 LIBERO 父项：`max_iter=1_000_000`、`save_iter=500`、`batch_size=4`、`grad_accum_iter=1`、并行 **FSDP**（`policy_fsdp`）。上表 CLI 覆盖 batch/步数/存盘；并行改为 DDP。仅写 `experiment=..._lora` 不写上述项时，**LoRA 仍在**，但是 FSDP 且会训很久。
+按需改 `batch_size` / `grad_accum_iter` 以匹配 GPU 数量与显存；OOM 时减小每卡 batch、增大 `grad_accum_iter`，尽量保持有效 batch 不变。
 
-**冷启动日志自检**（rank0）：应有 `Loading consolidated pretrained weights from: ...Cosmos-Policy-LIBERO-Predict2-2B.pt`、`Model uses LoRA, mapping checkpoint keys...`、`LoRA injection successful: ... trainable parameters out of ...`；不应是 `Training from scratch.`；可训练参数量应为全模型约 **0.x%** 量级。
+### 单卡 LoRA 示例（16GB 量级）
 
-| 项 | 本配方 |
-|----|--------|
-| GPU | 8×3090（24GB） |
-| `batch_size` / GPU | 6 |
-| `grad_accum_iter` | 12（每 12 次 micro-step 做一次 `optimizer.step`） |
-| 有效 batch | **576**（≈600） |
-| `max_iter` | 30000 |
-| `checkpoint.save_iter` | 1000 |
-| 输出目录 | `checkpoints/cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__8x3090_bs6_ga12/` |
-| W&B | project=`cosmos-policy`，group=`cosmos_v2_finetune`，run name 同 `job.name` |
-| 并行 | DDP（`trainer.distributed_parallelism=ddp`，`fsdp_shard_size=1`） |
-| LR 调度 | Franka 实验 `cycle_lengths=[10000, ...]`，30k step 时约 10k 后进入第二段 LR |
-
-训练前：`wandb login`（或 `export WANDB_API_KEY=...`）。不需要 W&B 时加 `job.wandb_mode=disabled`。纯训练不必加 `--group libero`（仅跑 LIBERO 仿真评估时需要）。
-
-显存：8×3090 上 `bs=6` + LoRA rank32 通常每卡约 15–20GB 量级；若 OOM 将 `batch_size` 降为 4、`grad_accum_iter` 改为 18（仍保持 \(4\times8\times18=576\)）。
-
-### 单卡 16GB LoRA 微调（有效 batch 192）
-
-适用：**1×16GB**（如 RTX 5070 Ti）。**LoRA rank/alpha=32**（实验默认），**每 GPU `batch_size=3`**，**`grad_accum_iter=64`** → 有效 batch **192**，**`lr=1e-5`**，**每 100 step 存盘**，**W&B 在线记录**。
-
-\[
-B_{\text{eff}} = 3 \times 1 \times 64 = 192
-\]
+**有效 batch**：3 × 1 × 64 = **192**
 
 ```bash
-cd /path/to/cosmos-policy
-
-# 可选：减轻显存碎片 OOM
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # 可选，缓解显存碎片
 
 uv run --extra cu128 --python 3.10 \
   torchrun --nproc_per_node=1 --master_port=12341 -m cosmos_policy.scripts.train \
@@ -356,79 +210,40 @@ uv run --extra cu128 --python 3.10 \
   dataloader_train.batch_size=3 \
   trainer.grad_accum_iter=64 \
   trainer.max_iter=30000 \
-  checkpoint.save_iter=100 \
-  trainer.logging_iter=10 \
+  checkpoint.save_iter=500 \
   optimizer.lr=1e-5 \
-  job.wandb_mode=online \
-  job.project=cosmos-policy \
-  job.group=cosmos_v2_finetune \
-  job.name=cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__1x16gb_bs3_ga64_lr1e-5
+  job.name=my_franka_lora_1gpu \
+  job.wandb_mode=disabled
 ```
 
-| 项 | 本配方 |
-|----|--------|
-| GPU | 1×16GB |
-| `batch_size` | 3 |
-| `grad_accum_iter` | 64（每 64 个 micro-step 一次 `optimizer.step`） |
-| 有效 batch | **192** |
-| `optimizer.lr` | **1e-5** |
-| `checkpoint.save_iter` | **100** |
-| `max_iter` | 30000（可按需改 `trainer.max_iter`） |
-| 输出目录 | `checkpoints/cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__1x16gb_bs3_ga64_lr1e-5/` |
-| W&B | `job.wandb_mode=online`，project=`cosmos-policy`，run name 同 `job.name` |
-
-训练前执行 `wandb login`。**勿写 `model=policy_ddp`**（见上一节说明）。
-
-**显存**：`bs=3` + LoRA 在 16GB 上可能接近上限；若 OOM，先试 `dataloader_train.num_workers=0`，或将 `batch_size=2`、`grad_accum_iter=96`（仍保持 \(2\times96=192\)）。
-
-**日志自检**：`total num parameters` 约 **2.29×10⁷**；应有 `LoRA injection successful` 与 `Loading consolidated pretrained weights from: ...LIBERO...`。
-
-### 单卡调试（可选）
+### 冒烟 / 断点续训
 
 ```bash
+# 短跑验证环境
 torchrun --nproc_per_node=1 ... \
   dataloader_train.batch_size=2 \
   trainer.grad_accum_iter=1 \
-  trainer.max_iter=100 \
+  trainer.max_iter=50 \
   job.wandb_mode=disabled \
-  job.name=cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__smoke
+  job.name=smoke_test
 ```
 
-### 全参数微调（可选，显存大）
+检查点：`checkpoints/<job.name>/checkpoints/iter_XXXXXXXX/` 与 `latest_checkpoint.txt`。
+
+**续训**：保持 **`job.name` 不变**，只改 `trainer.max_iter`（或更大）；不要改 batch、LoRA rank 等。日志应出现 `Resuming ckpt`，而不是再次 `Loading consolidated pretrained weights`。
+
+**冷启动自检**（rank0）：`Loading consolidated pretrained weights from: ...LIBERO...pt`、`LoRA injection successful`；不应是 `Training from scratch.`。
+
+W&B：需要时设 `job.wandb_mode=online` 并 `wandb login`；默认示例使用 `disabled`。
+
+### 全参数微调（可选）
 
 ```bash
 experiment="cosmos_predict2_2b_480p_vla4desk_franka_135_demos" \
-  trainer.grad_accum_iter=12 \
-  dataloader_train.batch_size=6
+  dataloader_train.batch_size=6 \
+  trainer.grad_accum_iter=12
 ```
-
-### 断点续训与修改 `max_iter`
-
-检查点写在：
-
-```text
-checkpoints/<job.name>/checkpoints/iter_000005000/
-checkpoints/<job.name>/checkpoints/latest_checkpoint.txt
-```
-
-**已训到 5000 step，只想把上限从 5000 改成 30000，能否接着训？**
-
-可以，需同时满足：
-
-1. **`job.name` 不变**（与 5000 step 那次完全相同）。
-2. **只改** `trainer.max_iter=30000`（或更大）；不要改 `batch_size`、`grad_accum_iter`、LoRA rank 等，否则优化器状态与数据分布不一致。
-3. 目录里已有 `latest_checkpoint.txt` 且指向 `iter_000005000`（或你想续的 iter）。
-
-用**同一条** `torchrun` 命令，仅把 `trainer.max_iter=30000` 写进去再跑即可；会从 **iteration 5000** 继续，直到 30000。日志里应出现 `Resuming ckpt .../iter_000005000` 且 `keys` 含 `model, optim, scheduler, trainer`，**不会**再走 LIBERO `.pt` 预加载。
-
-若改了 `job.name` → 视为新实验，默认从 0 开始（除非手动拷贝旧 `checkpoints/` 目录）。
-
-若把 `max_iter` 改成 **小于** 当前 iteration（例如已 5000 却设 `max_iter=3000`）→ 启动后会立刻结束训练。
-
-**收敛参考**：LIBERO 上 action L1 约 0.01–0.012（见 [LIBERO.md](LIBERO.md)）；小数据集不必强行对齐 1920 有效 batch。
-
-**推理（待完善）**：LoRA 推理实验名 `cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only`；加载训练产生的 DCP 目录 `.../checkpoints/iter_XXXXX/model/`（非单文件 `.pt`）。
 
 ## 推理
 
-（待补充 — 加载 checkpoint 进行真机推理部署）
+（待补充）训练产物为 DCP 目录 `checkpoints/<job.name>/checkpoints/iter_XXXXX/model/`。推理配置名：`cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only`。
