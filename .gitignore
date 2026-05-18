@@ -19,8 +19,10 @@ venv/
 .env
 .env.*
 
-# --- Hugging Face 本地缓存（LIBERO.md 里 HF_HOME 指向此处）---
+# --- Hugging Face 本地缓存（默认 <repo>/hf_cache，见 output_paths.py）---
 hf_cache/
+# Encoder-only export (~22G fp32); regenerate with scripts/export_t5_encoder_only.py
+hf_cache/t5-11b-encoder/
 .locks/
 
 # --- HF xet 传输日志 ---
@@ -36,6 +38,10 @@ cosmos_policy/experiments/robot/**/json_logs/
 /datasets/
 *.hdf5
 **/t5_embeddings.pkl
+
+# vla4desk/: 仅入库 *.txt（如 prompts.txt）；collected/、*.pkl 等保持本地
+vla4desk/*
+!vla4desk/*.txt
 
 # --- 训练 / 实验常见产物（预防性）---
 wandb/

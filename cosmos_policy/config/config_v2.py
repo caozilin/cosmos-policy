@@ -75,7 +75,7 @@ def make_config_v2():
     )
 
     # Set config attributes
-    c.job.project = "cosmos_policy"
+    c.job.project = "cosmos-policy"
     c.job.group = "train"
     c.job.name = "${now:%Y-%m-%d}_${now:%H-%M-%S}"
     c.trainer.type = Trainer

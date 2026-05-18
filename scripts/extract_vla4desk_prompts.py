@@ -16,7 +16,11 @@ import os
 import sys
 from collections import OrderedDict
 
-DATA_ROOT = "/media/czl/sata/franka_my_code/vla4desk/collected"
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from cosmos_policy.config.output_paths import default_vla4desk_collected_dir  # noqa: E402
 
 
 def collect_prompts(data_root: str) -> OrderedDict:
@@ -36,11 +40,17 @@ def collect_prompts(data_root: str) -> OrderedDict:
 
 def main():
     parser = argparse.ArgumentParser(description="Extract VLA4Desk prompts")
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=default_vla4desk_collected_dir(),
+        help="Root of collected episodes (default: <repo>/vla4desk/collected)",
+    )
     parser.add_argument("--quiet", "-q", action="store_true", help="Only list prompts, no task info")
     parser.add_argument("--output", "-o", type=str, default=None, help="Save prompts to a text file (one per line)")
     args = parser.parse_args()
 
-    prompts = collect_prompts(DATA_ROOT)
+    prompts = collect_prompts(args.data_root)
 
     if args.output:
         with open(args.output, "w") as f:

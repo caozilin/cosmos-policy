@@ -14,6 +14,7 @@
 
 import os
 
+from cosmos_policy.config.output_paths import default_base_datasets_dir
 from hydra.core.config_store import ConfigStore
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, DistributedSampler
@@ -34,7 +35,7 @@ val_sampling_size_override = dict(
     video_height=704,
     video_width=1280,
 )
-BASE_DATASETS_DIR = os.environ.get("BASE_DATASETS_DIR", ".")
+BASE_DATASETS_DIR = default_base_datasets_dir()
 
 
 # *** Main checkpoint ***
@@ -439,6 +440,137 @@ cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbow
         ),
     )
 )
+# *** VLA4Desk Franka real-robot fine-tuning (135 demos, LIBERO-style HDF5) ***
+_VLA4DESK_FRANKA_DATA_REL = os.path.join(
+    "datasets", "VLA4Desk-Franka", "success_only", "vla4desk_franka"
+)
+vla4desk_franka_135_demos_dataset = L(LIBERODataset)(
+    data_dir=os.path.join(BASE_DATASETS_DIR, _VLA4DESK_FRANKA_DATA_REL),
+    t5_text_embeddings_path=os.path.join(
+        BASE_DATASETS_DIR, _VLA4DESK_FRANKA_DATA_REL, "t5_embeddings.pkl"
+    ),
+    chunk_size=16,
+    use_image_aug=True,
+    use_wrist_images=True,
+    use_proprio=True,
+    normalize_proprio=True,
+    normalize_actions=True,
+    num_duplicates_per_image=4,
+    use_stronger_image_aug=True,
+    rollout_data_dir="",  # demos only (no policy rollouts yet)
+    demonstration_sampling_prob=1.0,
+    return_value_function_returns=True,
+    gamma=0.99,
+)
+cosmos_predict2_2b_480p_vla4desk_franka_135_demos = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_libero",
+            "_self_",
+        ],
+        checkpoint=dict(
+            load_path=get_checkpoint_path(
+                "hf://nvidia/Cosmos-Policy-LIBERO-Predict2-2B/Cosmos-Policy-LIBERO-Predict2-2B.pt"
+            ),
+            load_training_state=False,
+            strict_resume=False,
+            save_iter=500,
+        ),
+        scheduler=dict(
+            # Shorter schedule for ~42K-step Franka dataset (135 episodes)
+            cycle_lengths=[10000, 100000000000000],
+            warm_up_steps=[500, 0],
+            f_start=[1e-6, 0.06],
+            f_max=[1.0, 0.06],
+            f_min=[0.3, 0.06],
+        ),
+        dataloader_train=L(DataLoader)(
+            num_workers=4,
+            persistent_workers=True,
+            pin_memory=True,
+            dataset=vla4desk_franka_135_demos_dataset,
+            sampler=L(DistributedSampler)(
+                dataset=vla4desk_franka_135_demos_dataset,
+                num_replicas=L(parallel_state.get_data_parallel_world_size)(),
+                rank=L(parallel_state.get_data_parallel_rank)(),
+                shuffle=True,
+                seed=0,
+            ),
+            batch_size=4,
+            drop_last=True,
+        ),
+        job=dict(
+            project="cosmos-policy",
+            group="cosmos_v2_finetune",
+            name="cosmos_predict2_2b_480p_vla4desk_franka_135_demos",
+        ),
+    )
+)
+cosmos_predict2_2b_480p_vla4desk_franka_135_demos__inference_only = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_vla4desk_franka_135_demos",
+            "_self_",
+        ],
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                sde=L(HybridEDMSDE)(
+                    sigma_max=80,
+                    sigma_min=4,
+                )
+            )
+        ),
+        job=dict(
+            group="cosmos_v2_inference",
+            name="cosmos_predict2_2b_480p_vla4desk_franka_135_demos__inference_only",
+        ),
+    )
+)
+# LoRA fine-tune on LIBERO policy checkpoint (recommended for 24GB GPUs)
+cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_vla4desk_franka_135_demos",
+            "_self_",
+        ],
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                use_lora=True,
+                lora_rank=32,
+                lora_alpha=32,
+                lora_target_modules="q_proj,k_proj,v_proj,output_proj,mlp.layer1,mlp.layer2",
+                init_lora_weights=True,
+            ),
+        ),
+        job=dict(
+            project="cosmos-policy",
+            group="cosmos_v2_finetune",
+            name="cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora",
+        ),
+    )
+)
+cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora",
+            "_self_",
+        ],
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                sde=L(HybridEDMSDE)(
+                    sigma_max=80,
+                    sigma_min=4,
+                )
+            )
+        ),
+        job=dict(
+            group="cosmos_v2_inference",
+            name="cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only",
+        ),
+    )
+)
+
+
 # Inference version
 cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only = LazyDict(
     dict(
@@ -477,6 +609,11 @@ def register_configs():
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__inference_only,
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func,  # ALOHA planning model
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only,
+        # VLA4Desk Franka
+        cosmos_predict2_2b_480p_vla4desk_franka_135_demos,
+        cosmos_predict2_2b_480p_vla4desk_franka_135_demos__inference_only,
+        cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora,
+        cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only,
     ]:
         experiment_name = _item["job"]["name"]
         log.info(f"Registering experiment: {experiment_name}")

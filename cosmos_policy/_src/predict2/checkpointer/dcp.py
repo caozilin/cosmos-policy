@@ -597,6 +597,11 @@ class DistributedCheckpointer(AbstractCheckpointer):
             if self.callbacks is not None:
                 self.callbacks.on_load_checkpoint(model, state_dict=_state_dict)
             log.critical(f"Loaded checkpoint from {checkpoint_path} in iteration {iteration}")
+        elif self.load_path and str(self.load_path).endswith(".pt"):
+            log.info(
+                "No job DCP checkpoint to resume; consolidated .pt weights should already be loaded "
+                f"via CosmosPolicyTrainer (load_path={self.load_path})."
+            )
         else:
             log.info("Training from scratch.")
         torch.cuda.empty_cache()

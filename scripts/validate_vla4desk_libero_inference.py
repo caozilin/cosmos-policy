@@ -6,13 +6,9 @@ All model inputs (images, proprio, ground-truth actions) are read from the conve
 (same layout as LIBERODataset). Timestamps for 0–18 s sampling come only from an optional
 data.json sidecar (--timestamps-json); HDF5 does not store per-frame time.
 
-Example:
-  export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN}"
-  HF_HOME=/media/czl/sata/franka_my_code/cosmos-policy/hf_cache \\
+Example (paths default to <repo>/datasets/... and <repo>/vla4desk/collected/...):
   uv run --extra cu128 --group libero --python 3.10 \\
     python scripts/validate_vla4desk_libero_inference.py \\
-    --hdf5-path datasets/VLA4Desk-Franka/success_only/vla4desk_franka/put_the_yellow_cube_on_the_red_plate_demo.hdf5 \\
-    --timestamps-json /media/czl/sata/franka_my_code/vla4desk/collected/simple_pick_place/epo_1/data.json \\
     --output-dir ./validation_outputs/vla4desk_epo_1_hdf5
 """
 
@@ -22,7 +18,6 @@ import argparse
 import csv
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
@@ -35,12 +30,23 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from cosmos_policy.config.output_paths import (  # noqa: E402
+    apply_project_default_env,
+    default_hf_home,
+    default_vla4desk_example_data_json,
+    default_vla4desk_franka_dataset_dir,
+    repo_root,
+)
+
+apply_project_default_env()
+
 from cosmos_policy.constants import PROPRIO_DIM  # noqa: E402
 from cosmos_policy.datasets.dataset_utils import decode_jpeg_bytes_dataset  # noqa: E402
 from cosmos_policy.experiments.robot.cosmos_utils import (  # noqa: E402
     extract_action_chunk_from_latent_sequence,
     get_action,
     get_model,
+    get_t5_embedding_from_cache,
     init_t5_text_embeddings_cache,
     load_dataset_stats,
     rescale_proprio,
@@ -50,10 +56,9 @@ from cosmos_policy.experiments.robot.libero.run_libero_eval import PolicyEvalCon
 from cosmos_policy.experiments.robot.robot_utils import DATE_TIME  # noqa: E402
 
 _DEFAULT_HDF5 = (
-    _PROJECT_ROOT
-    / "datasets/VLA4Desk-Franka/success_only/vla4desk_franka/put_the_yellow_cube_on_the_red_plate_demo.hdf5"
+    Path(default_vla4desk_franka_dataset_dir()) / "put_the_yellow_cube_on_the_red_plate_demo.hdf5"
 )
-_LIBERO_SNAPSHOT_GLOB = "models--nvidia--Cosmos-Policy-LIBERO-Predict2-2B/snapshots/*"
+_DEFAULT_VLA4DESK_T5 = _DEFAULT_HDF5.parent / "t5_embeddings.pkl"
 
 # robot_states in HDF5: gripper_qpos(2) + eef_pos(3) + eef_quat_xyzw(4)
 PROPRIO_NAMES = (
@@ -191,13 +196,12 @@ def to_jsonable(x):
 
 
 def _libero_cache_roots() -> list[Path]:
-    roots: list[Path] = []
-    hf_home = os.environ.get("HF_HOME", "").strip()
-    if hf_home:
-        roots.append(Path(hf_home).expanduser().resolve())
-    project_cache = (_PROJECT_ROOT / "hf_cache").resolve()
-    if project_cache not in roots:
-        roots.append(project_cache)
+    roots: list[Path] = [Path(default_hf_home()).resolve()]
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE", "").strip()
+    if hf_hub_cache:
+        hub_path = Path(hf_hub_cache).expanduser().resolve()
+        if hub_path not in roots:
+            roots.append(hub_path)
     return roots
 
 
@@ -221,28 +225,40 @@ def _looks_like_hf_repo_path(path: str) -> bool:
     return bool(path) and not path.startswith(("/", "./")) and "/" in path
 
 
-def resolve_local_libero_paths(
-    ckpt_path: str,
-    dataset_stats_path: str,
-    t5_text_embeddings_path: str,
-) -> tuple[str, str, str, Path | None]:
-    """Prefer on-disk LIBERO assets to avoid HuggingFace network calls."""
+def resolve_local_libero_paths(ckpt_path: str, dataset_stats_path: str) -> tuple[str, str, Path | None]:
+    """Prefer on-disk LIBERO checkpoint/stats (HF snapshot) to avoid network download."""
     snap = find_libero_snapshot_dir()
     if snap is None:
-        return ckpt_path, dataset_stats_path, t5_text_embeddings_path, None
+        return ckpt_path, dataset_stats_path, None
 
     local_ckpt = snap / "Cosmos-Policy-LIBERO-Predict2-2B.pt"
     local_stats = snap / "libero_dataset_statistics.json"
-    local_t5 = snap / "libero_t5_embeddings.pkl"
 
     if _looks_like_hf_repo_path(ckpt_path) and local_ckpt.is_file():
         ckpt_path = str(local_ckpt)
     if _looks_like_hf_repo_path(dataset_stats_path) and local_stats.is_file():
         dataset_stats_path = str(local_stats)
-    if _looks_like_hf_repo_path(t5_text_embeddings_path) and local_t5.is_file():
-        t5_text_embeddings_path = str(local_t5)
 
-    return ckpt_path, dataset_stats_path, t5_text_embeddings_path, snap
+    return ckpt_path, dataset_stats_path, snap
+
+
+def resolve_vla4desk_t5_path(hdf5_path: Path, t5_text_embeddings_path: str) -> str:
+    """Use Franka/VLA4Desk t5_embeddings.pkl (not LIBERO libero_t5_embeddings.pkl)."""
+    if t5_text_embeddings_path and not _looks_like_hf_repo_path(t5_text_embeddings_path):
+        p = Path(t5_text_embeddings_path).expanduser().resolve()
+        if p.is_file():
+            return str(p)
+
+    candidates = [
+        hdf5_path.parent / "t5_embeddings.pkl",
+        _DEFAULT_VLA4DESK_T5,
+        _PROJECT_ROOT / "vla4desk/t5_embeddings.pkl",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    return t5_text_embeddings_path
 
 
 def unnormalize_proprio(
@@ -276,21 +292,6 @@ def extract_predicted_future_proprio(result: dict) -> np.ndarray | None:
 def future_frame_index(frame_idx: int, chunk_size: int, num_frames: int) -> int:
     """Match LIBERODataset: future proprio at t + chunk_size (clamped)."""
     return min(frame_idx + chunk_size, num_frames - 1)
-
-
-def pick_random_libero_t5_embedding(seed: int) -> tuple[str, np.ndarray]:
-    if not t5_text_embeddings_cache:
-        raise RuntimeError(
-            "T5 cache is empty. Check --t5-text-embeddings-path and HF_TOKEN / HF_HOME."
-        )
-    rng = random.Random(seed)
-    prompt = rng.choice(list(t5_text_embeddings_cache.keys()))
-    emb = t5_text_embeddings_cache[prompt]
-    if isinstance(emb, torch.Tensor):
-        emb_np = emb.detach().cpu().float().numpy()
-    else:
-        emb_np = np.asarray(emb, dtype=np.float32)
-    return prompt, emb_np
 
 
 def named_vector(values: np.ndarray, names: tuple[str, ...]) -> dict[str, float]:
@@ -331,11 +332,9 @@ def parse_args() -> argparse.Namespace:
     snap = find_libero_snapshot_dir()
     default_ckpt = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
     default_stats = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_dataset_statistics.json"
-    default_t5 = "nvidia/Cosmos-Policy-LIBERO-Predict2-2B/libero_t5_embeddings.pkl"
     if snap is not None:
-        default_ckpt, default_stats, default_t5, _ = resolve_local_libero_paths(
-            default_ckpt, default_stats, default_t5
-        )
+        default_ckpt, default_stats, _ = resolve_local_libero_paths(default_ckpt, default_stats)
+    default_t5 = str(_DEFAULT_VLA4DESK_T5) if _DEFAULT_VLA4DESK_T5.is_file() else ""
 
     p = argparse.ArgumentParser(
         description="Validate VLA4Desk LIBERO-style HDF5 with Cosmos Policy (LIBERO checkpoint)."
@@ -345,7 +344,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--timestamps-json",
         type=Path,
-        default=Path("/media/czl/sata/franka_my_code/vla4desk/collected/simple_pick_place/epo_1/data.json"),
+        default=Path(default_vla4desk_example_data_json()),
         help="Optional data.json only for mapping target seconds -> frame index (not used for pixels/proprio)",
     )
     p.add_argument(
@@ -359,25 +358,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end-time", type=float, default=18.0)
     p.add_argument("--time-step", type=float, default=2.0)
     p.add_argument("--seed", type=int, default=195)
-    p.add_argument("--t5-seed", type=int, default=None, help="Seed for random LIBERO prompt; defaults to --seed")
+    p.add_argument(
+        "--task-prompt",
+        type=str,
+        default=None,
+        help="Override language prompt (default: HDF5 attrs task_description)",
+    )
     p.add_argument("--flip-images", action="store_true", help="Flip images like LIBERO sim (usually off for real robot)")
     p.add_argument("--config", default="cosmos_predict2_2b_480p_libero__inference_only")
     p.add_argument("--ckpt-path", default=default_ckpt)
     p.add_argument("--dataset-stats-path", default=default_stats)
-    p.add_argument("--t5-text-embeddings-path", default=default_t5)
+    p.add_argument(
+        "--t5-text-embeddings-path",
+        default=default_t5,
+        help="VLA4Desk t5_embeddings.pkl (default: next to --hdf5-path or datasets/.../vla4desk_franka/)",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    t5_seed = args.seed if args.t5_seed is None else args.t5_seed
 
     os.environ["DETERMINISTIC"] = "True"
 
-    args.ckpt_path, args.dataset_stats_path, args.t5_text_embeddings_path, libero_snap = (
-        resolve_local_libero_paths(
-            args.ckpt_path, args.dataset_stats_path, args.t5_text_embeddings_path
-        )
+    hdf5_path = args.hdf5_path.expanduser().resolve()
+    args.t5_text_embeddings_path = resolve_vla4desk_t5_path(hdf5_path, args.t5_text_embeddings_path)
+
+    args.ckpt_path, args.dataset_stats_path, libero_snap = resolve_local_libero_paths(
+        args.ckpt_path, args.dataset_stats_path
     )
     if libero_snap is not None:
         print(f"Using local LIBERO assets (no HuggingFace download): {libero_snap}")
@@ -387,7 +395,6 @@ def main() -> None:
             "will contact huggingface.co for nvidia/Cosmos-Policy-LIBERO-Predict2-2B"
         )
 
-    hdf5_path = args.hdf5_path.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     comparisons_dir = output_dir / "comparisons"
     comparisons_dir.mkdir(parents=True, exist_ok=True)
@@ -433,11 +440,24 @@ def main() -> None:
         deterministic=True,
     )
 
+    task_prompt = (args.task_prompt or episode["prompt"]).strip()
+    if not task_prompt:
+        raise ValueError("Empty task prompt. Set HDF5 task_description or pass --task-prompt.")
+
     print("Loading dataset stats and T5 cache ...")
     dataset_stats = load_dataset_stats(cfg.dataset_stats_path)
+    if not Path(cfg.t5_text_embeddings_path).is_file():
+        raise FileNotFoundError(
+            f"VLA4Desk T5 embeddings not found: {cfg.t5_text_embeddings_path}\n"
+            "Run scripts/precompute_t5_embeddings.py on prompts.txt first."
+        )
     init_t5_text_embeddings_cache(cfg.t5_text_embeddings_path)
-    libero_prompt, t5_embedding = pick_random_libero_t5_embedding(t5_seed)
-    print(f"Using random LIBERO T5 prompt: {libero_prompt!r}")
+    if task_prompt not in t5_text_embeddings_cache:
+        print(f"Prompt not in pkl; will compute T5 online once: {task_prompt!r}")
+    else:
+        _ = get_t5_embedding_from_cache(task_prompt)
+    print(f"Using task prompt: {task_prompt!r}")
+    print(f"T5 embeddings: {cfg.t5_text_embeddings_path}")
 
     print("Loading model (may download checkpoint on first run) ...")
     model, _ = get_model(cfg)
@@ -486,7 +506,7 @@ def main() -> None:
             model,
             dataset_stats,
             observation,
-            t5_embedding,
+            task_prompt,
             seed=cfg.seed + int(target_s),
             num_denoising_steps_action=cfg.num_denoising_steps_action,
             generate_future_state_and_value_in_parallel=True,
@@ -563,17 +583,16 @@ def main() -> None:
         "num_frames": episode["num_frames"],
         "time_index_mode": time_index_mode,
         "timestamps_json": str(args.timestamps_json) if args.timestamps_json else None,
-        "libero_t5_prompt_used": libero_prompt,
+        "task_prompt": task_prompt,
+        "t5_embeddings_path": cfg.t5_text_embeddings_path,
         "note": (
-            "Images/proprio/actions from HDF5 (LIBERODataset layout). "
-            "Random LIBERO T5 embedding at inference. "
-            "timestamps_json only selects which frame index per target second."
+            "LIBERO checkpoint + VLA4Desk task prompt from t5_embeddings.pkl. "
+            "timestamps_json only selects frame index per target second."
         ),
         "config": {
             "ckpt_path": cfg.ckpt_path,
             "flip_images": cfg.flip_images,
             "seed": cfg.seed,
-            "t5_seed": t5_seed,
         },
         "time_range_s": {"start": args.start_time, "end": args.end_time, "step": args.time_step},
         "proprio_layout": list(PROPRIO_NAMES),

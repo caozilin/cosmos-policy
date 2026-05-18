@@ -25,8 +25,16 @@ import sys
 from collections import OrderedDict
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_DEFAULT_EVAL_ROOT = "/home/czl/桌面/毕设/结题报告/素材/eval"
-_DEFAULT_OUTPUT = os.path.join(_PROJECT_ROOT, "vla4desk", "prompts.txt")
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from cosmos_policy.config.output_paths import (  # noqa: E402
+    default_vla4desk_eval_dir,
+    default_vla4desk_prompts_txt,
+)
+
+_DEFAULT_EVAL_ROOT = default_vla4desk_eval_dir()
+_DEFAULT_OUTPUT = default_vla4desk_prompts_txt()
 _COMMITTED_PROMPTS_GIT_PATH = "vla4desk/prompts.txt"
 
 

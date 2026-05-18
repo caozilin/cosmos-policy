@@ -19,8 +19,16 @@ import pickle
 import sys
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_DEFAULT_INPUT = os.path.join(_PROJECT_ROOT, "vla4desk", "prompts.txt")
-_DEFAULT_OUTPUT = os.path.join(_PROJECT_ROOT, "vla4desk", "t5_embeddings.pkl")
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from cosmos_policy.config.output_paths import apply_project_default_env, default_hf_home, repo_root  # noqa: E402
+
+apply_project_default_env()
+
+_DEFAULT_INPUT = os.path.join(repo_root(), "vla4desk", "prompts.txt")
+_DEFAULT_OUTPUT = os.path.join(repo_root(), "vla4desk", "t5_embeddings.pkl")
+_DEFAULT_HF_CACHE = default_hf_home()
 
 
 def _apply_gpu_env_from_argv() -> None:
@@ -90,8 +98,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hf-hub-cache",
         type=str,
-        default=None,
-        help="HF hub cache dir (default: HF_HUB_CACHE env or ./hf_cache)",
+        default=_DEFAULT_HF_CACHE,
+        help="HF hub cache dir (default: <repo>/hf_cache)",
     )
     parser.add_argument(
         "--local-files-only",
@@ -102,8 +110,8 @@ def parse_args() -> argparse.Namespace:
         "--dtype",
         type=str,
         choices=["bf16", "fp32", "float32"],
-        default="bf16",
-        help="T5 weight dtype when loading (default: bf16). fp32 uses more VRAM/RAM.",
+        default="fp32",
+        help="T5 weight dtype when loading (default: fp32). Use bf16 for lower VRAM.",
     )
     return parser.parse_args()
 
@@ -123,7 +131,7 @@ def main() -> None:
     prompts = load_prompts(args.input)
     print(f"Loaded {len(prompts)} unique prompts from {args.input}")
     print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '(all visible)')}")
-    hf_cache = args.hf_hub_cache or os.environ.get("HF_HUB_CACHE") or os.path.join(_PROJECT_ROOT, "hf_cache")
+    hf_cache = args.hf_hub_cache or os.environ.get("HF_HUB_CACHE") or default_hf_home()
     hf_cache = os.path.abspath(os.path.expanduser(hf_cache))
     os.environ.setdefault("HF_HUB_CACHE", hf_cache)
     local_files_only = args.local_files_only or os.environ.get("HF_HUB_OFFLINE", "").lower() in (

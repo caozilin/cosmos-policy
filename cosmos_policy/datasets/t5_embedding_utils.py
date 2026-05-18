@@ -33,7 +33,7 @@ def generate_t5_embeddings(
     max_gpu_mem_gib: Optional[float] = None,
     cache_dir: Optional[str] = None,
     local_files_only: Optional[bool] = None,
-    dtype: str = "bf16",
+    dtype: str = "fp32",
 ) -> Dict[str, torch.Tensor]:
     """
     Generate T5 text embeddings for a list of commands.

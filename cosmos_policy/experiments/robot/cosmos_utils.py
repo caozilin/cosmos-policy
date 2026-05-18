@@ -139,9 +139,11 @@ def download_hf_checkpoint(repo_id: str, cache_dir: str | None = None) -> str:
     """
     print(f"Downloading checkpoint from HuggingFace: {repo_id}")
 
-    # Use HF_HOME environment variable if cache_dir not specified
+    # Use project hf_cache if cache_dir not specified
     if cache_dir is None:
-        cache_dir = os.environ.get("HF_HOME", None)
+        from cosmos_policy.config.output_paths import default_hf_home
+
+        cache_dir = os.environ.get("HF_HOME") or default_hf_home()
 
     # Download the entire repository
     local_dir = snapshot_download(
@@ -189,9 +191,11 @@ def download_hf_file(hf_path: str, cache_dir: str | None = None) -> str:
 
     print(f"Downloading file from HuggingFace: {hf_path}")
 
-    # Use HF_HOME environment variable if cache_dir not specified
+    # Use project hf_cache if cache_dir not specified
     if cache_dir is None:
-        cache_dir = os.environ.get("HF_HOME", None)
+        from cosmos_policy.config.output_paths import default_hf_home
+
+        cache_dir = os.environ.get("HF_HOME") or default_hf_home()
 
     # Download the specific file
     local_path = hf_hub_download(

@@ -27,7 +27,7 @@ round-trip match. Point training at <output>/<suite_name>/t5_embeddings.pkl when
 
 Example:
     python scripts/convert_vla4desk_to_libero_hdf5.py \\
-        --input /media/czl/sata/franka_my_code/vla4desk/collected \\
+        --input ./vla4desk/collected \\
         --output ./datasets/VLA4Desk-Franka/success_only
 """
 
@@ -51,6 +51,13 @@ from tqdm import tqdm
 from cosmos_policy.utils.utils import jpeg_encode_image
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from cosmos_policy.config.output_paths import (  # noqa: E402
+    default_vla4desk_collected_dir,
+    default_vla4desk_success_only_dir,
+)
 _DEFAULT_T5_CANDIDATES = (
     _PROJECT_ROOT / "vla4desk" / "t5_embeddings.pkl",
 )
@@ -399,13 +406,13 @@ def parse_args() -> argparse.Namespace:
         "--input",
         "-i",
         type=str,
-        default="/media/czl/sata/franka_my_code/vla4desk/collected",
+        default=default_vla4desk_collected_dir(),
     )
     parser.add_argument(
         "--output",
         "-o",
         type=str,
-        default="./datasets/VLA4Desk-Franka/success_only",
+        default=default_vla4desk_success_only_dir(),
     )
     parser.add_argument(
         "--suite-name",

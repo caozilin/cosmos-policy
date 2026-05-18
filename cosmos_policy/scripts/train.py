@@ -24,6 +24,10 @@ import argparse
 import os
 import traceback
 
+from cosmos_policy.config.output_paths import apply_project_default_env, resolve_policy_output_root
+
+apply_project_default_env()
+
 from loguru import logger as logging
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, DistributedSampler
@@ -34,6 +38,7 @@ from cosmos_policy._src.imaginaire.serialization import to_yaml
 from cosmos_policy._src.imaginaire.utils import distributed
 from cosmos_policy._src.imaginaire.utils.context_managers import data_loader_init, distributed_init, model_init
 from cosmos_policy._src.imaginaire.utils.launch import log_reproducible_setup
+from cosmos_policy.trainer import load_consolidated_pretrained_if_needed
 
 
 @logging.catch(reraise=True)
@@ -46,6 +51,11 @@ def launch(config: Config, args: argparse.Namespace) -> None:
 
     # Check that the config is valid
     config.validate()
+    if distributed.is_rank0():
+        logging.info(
+            f"Cosmos Policy output root: {resolve_policy_output_root()} "
+            f"(job dir: {config.job.path_local})"
+        )
     # Freeze the config so developers don't change it during training.
     config.freeze()  # type: ignore
     trainer = config.trainer.type(config)
@@ -54,6 +64,9 @@ def launch(config: Config, args: argparse.Namespace) -> None:
 
     with model_init():
         model = instantiate(config.model)
+        model = model.to("cuda", memory_format=config.trainer.memory_format)  # type: ignore
+        # Load LIBERO .pt before DataLoader workers fork to avoid CPU RAM spike (OOM SIGKILL).
+        load_consolidated_pretrained_if_needed(model, config)
 
     # Create the dataloaders.
     with data_loader_init():

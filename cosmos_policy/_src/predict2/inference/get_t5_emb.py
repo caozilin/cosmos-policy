@@ -26,6 +26,8 @@ transformers.logging.set_verbosity_error()
 
 T5_MODEL_DIR = "checkpoints/google-t5/t5-11b"
 T5_HF_REPO = "google-t5/t5-11b"
+# Encoder-only export from scripts/export_t5_encoder_only.py (under HF_HUB_CACHE root)
+T5_ENCODER_SUBDIR = "t5-11b-encoder"
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 _DEFAULT_HF_HUB_CACHE = os.path.join(_REPO_ROOT, "hf_cache")
 
@@ -40,6 +42,44 @@ def resolve_hf_hub_cache(cache_dir: Optional[str] = None) -> Optional[str]:
     if os.path.isdir(_DEFAULT_HF_HUB_CACHE):
         return _DEFAULT_HF_HUB_CACHE
     return None
+
+
+def t5_encoder_only_dir(cache_dir: str) -> str:
+    return os.path.join(cache_dir, T5_ENCODER_SUBDIR)
+
+
+def resolve_t5_encoder_only(cache_dir: Optional[str]) -> Optional[str]:
+    """Return local encoder-only export path if ``<cache>/t5-11b-encoder/pytorch_model.bin`` exists."""
+    if not cache_dir:
+        return None
+    path = t5_encoder_only_dir(cache_dir)
+    if os.path.isfile(os.path.join(path, "pytorch_model.bin")):
+        return path
+    return None
+
+
+def resolve_t5_load_path(cache_dir: Optional[str], model_name: str = T5_HF_REPO) -> str:
+    """Prefer encoder-only export; otherwise HuggingFace repo id (full checkpoint)."""
+    encoder_path = resolve_t5_encoder_only(cache_dir)
+    if encoder_path is not None:
+        return encoder_path
+    return model_name
+
+
+def assert_t5_encoder_only(cache_dir: str) -> None:
+    path = resolve_t5_encoder_only(cache_dir)
+    if path is None:
+        raise FileNotFoundError(
+            f"Encoder-only weights not found at {t5_encoder_only_dir(cache_dir)}. "
+            f"Run: python scripts/export_t5_encoder_only.py"
+        )
+    missing = [
+        n
+        for n in ("pytorch_model.bin", "config.json", "spiece.model", "tokenizer.json")
+        if not os.path.isfile(os.path.join(path, n))
+    ]
+    if missing:
+        raise FileNotFoundError(f"Incomplete encoder export at {path}: missing {missing}")
 
 
 def assert_t5_hub_cache(cache_dir: str, model_name: str = T5_HF_REPO) -> None:
@@ -73,14 +113,15 @@ def default_local_files_only(local_files_only: Optional[bool] = None) -> bool:
     return os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes")
 
 
-def resolve_torch_dtype(dtype: Optional[str] = "bf16") -> torch.dtype:
+def resolve_torch_dtype(dtype: Optional[str] = "fp32") -> torch.dtype:
     """Map user-facing dtype name to ``torch.dtype`` for ``from_pretrained``."""
-    if dtype is None or dtype in ("bf16", "bfloat16"):
+    if dtype is None or dtype in ("fp32", "float32", "32"):
+        return torch.float32
+    if dtype in ("bf16", "bfloat16"):
         return torch.bfloat16
-    if dtype in ("fp32", "float32", "fp16", "float16", "32", "16"):
-        name = {"fp32": "float32", "32": "float32", "fp16": "float16", "16": "float16"}.get(dtype, dtype)
-        return getattr(torch, name)
-    raise ValueError(f"Unsupported T5 load dtype: {dtype!r}. Use bf16 or fp32.")
+    if dtype in ("fp16", "float16", "16"):
+        return torch.float16
+    raise ValueError(f"Unsupported T5 load dtype: {dtype!r}. Use fp32 or bf16.")
 
 
 class CosmosT5TextEncoder(torch.nn.Module):
@@ -93,7 +134,7 @@ class CosmosT5TextEncoder(torch.nn.Module):
         cache_dir=None,
         local_files_only=False,
         max_gpu_mem_gib: Optional[float] = None,
-        dtype: str = "bf16",
+        dtype: str = "fp32",
     ):
         """Initializes the T5 tokenizer and encoder.
 
@@ -101,40 +142,57 @@ class CosmosT5TextEncoder(torch.nn.Module):
             model_name: The name of the T5 model to use.
             device: ``cuda``, ``cpu``, or ``auto`` (GPU+CPU offload via device_map).
             max_gpu_mem_gib: When device is ``auto``, cap GPU memory (GiB) and offload the rest to CPU.
-            dtype: Weight/compute dtype: ``bf16`` (default) or ``fp32`` / ``float32``.
+            dtype: Weight/compute dtype: ``fp32`` (default) or ``bf16``.
         """
         super().__init__()
         self.torch_dtype = resolve_torch_dtype(dtype)
         cache_dir = resolve_hf_hub_cache(cache_dir)
         local_files_only = default_local_files_only(local_files_only)
+        load_path = resolve_t5_load_path(cache_dir, model_name=model_name)
+        use_encoder_only = os.path.isdir(load_path)
+
         if cache_dir is not None:
-            assert_t5_hub_cache(cache_dir, model_name=model_name)
+            if use_encoder_only:
+                assert_t5_encoder_only(cache_dir)
+            else:
+                assert_t5_hub_cache(cache_dir, model_name=model_name)
             print(
                 f"Using HF hub cache: {cache_dir} "
                 f"(local_files_only={local_files_only}, dtype={self.torch_dtype})"
             )
+            if use_encoder_only:
+                print(f"Loading encoder-only weights: {load_path}")
+
+        tok_kwargs = (
+            dict(local_files_only=True)
+            if use_encoder_only
+            else dict(cache_dir=cache_dir, local_files_only=local_files_only)
+        )
         self.tokenizer = T5TokenizerFast.from_pretrained(
-            model_name, cache_dir=cache_dir, local_files_only=local_files_only
+            load_path if use_encoder_only else model_name, **tok_kwargs
         )
         load_kwargs = dict(
-            cache_dir=cache_dir,
-            local_files_only=local_files_only,
             torch_dtype=self.torch_dtype,
-            # Local cache has pytorch_model.bin only; avoid re-downloading ~45G safetensors.
             use_safetensors=False,
+            low_cpu_mem_usage=True,
         )
+        if use_encoder_only:
+            load_kwargs["local_files_only"] = True
+        else:
+            load_kwargs["cache_dir"] = cache_dir
+            load_kwargs["local_files_only"] = local_files_only
         self._uses_device_map = False
         if device == "auto":
             if max_gpu_mem_gib is None:
                 max_gpu_mem_gib = 12.0
             max_memory = {0: f"{max_gpu_mem_gib}GiB", "cpu": "128GiB"}
             self.text_encoder = T5EncoderModel.from_pretrained(
-                model_name, device_map="auto", max_memory=max_memory, **load_kwargs
+                load_path, device_map="auto", max_memory=max_memory, **load_kwargs
             )
             self._uses_device_map = True
             self.device = next(self.text_encoder.parameters()).device
         else:
-            self.text_encoder = T5EncoderModel.from_pretrained(model_name, **load_kwargs).to(device)
+            self.text_encoder = T5EncoderModel.from_pretrained(load_path, **load_kwargs).to(device)
             self.device = device
         self.text_encoder.eval()
 
@@ -232,7 +290,7 @@ def get_text_embedding(
     local_files_only: Optional[bool] = None,
     text_encoder_class: str = "T5",
     max_gpu_mem_gib: Optional[float] = None,
-    dtype: str = "bf16",
+    dtype: str = "fp32",
 ) -> torch.Tensor:
     """Encodes text prompts into T5 embeddings.
 

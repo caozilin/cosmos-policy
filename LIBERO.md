@@ -43,7 +43,7 @@ To start evaluations with this checkpoint, run the command below, where `task_su
 
 ```bash
 export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN to your Hugging Face access token}"
-HF_HOME=/media/czl/sata/franka_my_code/cosmos-policy/hf_cache uv run --extra cu128 --group libero --python 3.10 \
+HF_HOME=./hf_cache uv run --extra cu128 --group libero --python 3.10 \
   python -m cosmos_policy.experiments.robot.libero.run_libero_eval \
     --config cosmos_predict2_2b_480p_libero__inference_only \
     --ckpt_path nvidia/Cosmos-Policy-LIBERO-Predict2-2B \

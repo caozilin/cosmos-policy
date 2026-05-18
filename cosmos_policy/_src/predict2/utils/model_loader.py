@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import importlib
 import os
 from typing import Optional
@@ -34,6 +35,33 @@ from cosmos_policy._src.predict2.checkpointer.dcp import (
     ModelWrapper,
     dcp_load_state_dict,
 )
+
+
+def extract_model_state_dict_from_pt_checkpoint(checkpoint_blob: dict) -> dict:
+    """Unwrap common consolidated checkpoint layouts to a flat model state dict."""
+    if "model" in checkpoint_blob:
+        return checkpoint_blob["model"]
+    if "state_dict" in checkpoint_blob:
+        return checkpoint_blob["state_dict"]
+    return checkpoint_blob
+
+
+def remap_net_ema_to_net(state_dict: dict) -> dict:
+    """Map ``net_ema.*`` keys to ``net.*`` for loading EMA weights into the regular model."""
+    remapped = {}
+    for key, value in state_dict.items():
+        if key.startswith("net_ema."):
+            remapped[key.replace("net_ema.", "net.", 1)] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
+def load_pt_checkpoint_blob(checkpoint_path: str) -> dict:
+    """Load a consolidated ``.pt`` without pinning the full tensor dict in CPU RAM."""
+    map_location = "cuda" if torch.cuda.is_available() else "cpu"
+    log.info(f"Loading checkpoint tensors to {map_location}: {checkpoint_path}")
+    return torch.load(checkpoint_path, map_location=map_location, weights_only=True)
 
 
 def load_model_from_checkpoint(
@@ -225,7 +253,14 @@ def load_model_state_dict_from_checkpoint(
         # Load on rank0 only and broadcast
         if distributed.is_rank0():
             log.info(f"Loading model cached locally from {local_s3_ckpt_fp}")
-            local_state_dict = easy_io.load(local_s3_ckpt_fp, weights_only=INTERNAL)
+            if checkpoint_format == "pt":
+                checkpoint_blob = load_pt_checkpoint_blob(local_s3_ckpt_fp)
+            else:
+                checkpoint_blob = easy_io.load(local_s3_ckpt_fp, weights_only=INTERNAL)
+            local_state_dict = extract_model_state_dict_from_pt_checkpoint(checkpoint_blob)
+            del checkpoint_blob
+            if load_ema_to_reg:
+                local_state_dict = remap_net_ema_to_net(local_state_dict)
 
             # Handle LoRA key mapping if the model uses LoRA and checkpoint is in .pt format
             if (
@@ -264,10 +299,14 @@ def load_model_state_dict_from_checkpoint(
                 if missing_keys:
                     log.warning(f"Missing keys in checkpoint: {missing_keys[:10]}... (showing first 10)")
 
+                del local_state_dict
                 local_state_dict = mapped_state_dict
 
             # `strict=False` is needed to avoid errors: `Skipping key ... introduced by TransformerEngine for FP8 in the checkpoint.`
             model.load_state_dict(local_state_dict, strict=False)
+            del local_state_dict
+            gc.collect()
+            torch.cuda.empty_cache()
 
         # Synchronize model states from rank 0 to all other ranks
         # Skip EMA parameters and buffers to avoid OOM - they are on CPU now, and will be moved to CUDA and synced via copy from main model after FSDP

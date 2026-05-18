@@ -200,6 +200,12 @@ class JobConfig:
 
     @property
     def path_local(self) -> str:
+        # Cosmos Policy training: <repo>/checkpoints/<job.name>/ (see cosmos_policy.scripts.train)
+        layout = os.environ.get("COSMOS_POLICY_CHECKPOINTS_LAYOUT", "").lower()
+        if layout in ("1", "true", "yes"):
+            from cosmos_policy.config.output_paths import resolve_policy_output_root
+
+            return os.path.join(resolve_policy_output_root(), self.name)
         local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "/tmp/imaginaire4-output")
         return f"{local_root}/{self.path}"
 

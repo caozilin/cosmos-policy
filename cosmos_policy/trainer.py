@@ -18,8 +18,10 @@ Extended Trainer for Cosmos Policy with epoch tracking.
 
 This trainer extends the base ImaginaireTrainer to add:
 - Epoch tracking and sampler epoch setting for proper distributed sampling
+- Consolidated .pt pretrained weight loading (DCP checkpointer skips .pt paths)
 """
 
+import os
 import signal
 
 import torch
@@ -28,7 +30,42 @@ import torch.utils.data
 from cosmos_policy._src.imaginaire.model import ImaginaireModel
 from cosmos_policy._src.imaginaire.trainer import ImaginaireTrainer
 from cosmos_policy._src.imaginaire.utils import distributed, log, misc
+from cosmos_policy._src.imaginaire.utils.easy_io import easy_io
 from cosmos_policy._src.imaginaire.utils.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
+from cosmos_policy._src.predict2.utils.model_loader import load_model_state_dict_from_checkpoint
+
+
+def job_has_training_checkpoint(job_path_local: str) -> bool:
+    """True if this job already has a DCP checkpoint to resume (not a cold start)."""
+    latest_path = os.path.join(job_path_local, "checkpoints", "latest_checkpoint.txt")
+    return easy_io.exists(latest_path)
+
+
+def load_consolidated_pretrained_if_needed(model: ImaginaireModel, config) -> None:
+    """Load ``checkpoint.load_path`` when it is a consolidated ``.pt`` (e.g. LIBERO policy)."""
+    if getattr(model, "_consolidated_pretrained_loaded", False):
+        return
+    load_path = config.checkpoint.load_path
+    if not load_path:
+        return
+    load_path = str(load_path)
+    if not load_path.endswith(".pt"):
+        return
+    if job_has_training_checkpoint(config.job.path_local):
+        log.info(
+            "Found existing job checkpoint under "
+            f"{config.job.path_local}/checkpoints; skipping consolidated .pt preload."
+        )
+        return
+    log.critical(f"Loading consolidated pretrained weights from: {load_path}")
+    load_model_state_dict_from_checkpoint(
+        model=model,
+        config=config,
+        s3_checkpoint_dir=load_path,
+        load_ema_to_reg=config.checkpoint.load_ema_to_reg,
+    )
+    model._consolidated_pretrained_loaded = True  # noqa: SLF001
+    log.critical("Finished loading consolidated pretrained weights.")
 
 
 class CosmosPolicyTrainer(ImaginaireTrainer):
@@ -38,6 +75,7 @@ class CosmosPolicyTrainer(ImaginaireTrainer):
     Adds special handling for:
     - Epoch tracking to properly set dataloader sampler epochs (needed for distributed training)
     - Simplified initial validation check (removes run_validation_on_start requirement)
+    - Loading consolidated .pt pretrained weights (e.g. LIBERO) before DCP resume logic
     """
 
     def __init__(self, config):
@@ -59,6 +97,8 @@ class CosmosPolicyTrainer(ImaginaireTrainer):
         # Leaving this for backward compability for now, but we can think about moving this to model.on_train_start for all models.
         model = model.to("cuda", memory_format=self.config.trainer.memory_format)  # type: ignore
         model.on_train_start(self.config.trainer.memory_format)
+
+        load_consolidated_pretrained_if_needed(model, self.config)
 
         # Initialize the optimizer, scheduler, and grad_scaler.
         self.callbacks.on_optimizer_init_start()

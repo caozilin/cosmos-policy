@@ -23,6 +23,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from cosmos_policy.config.output_paths import default_vla4desk_example_data_json  # noqa: E402
 _VLA4DESK_SRC = _PROJECT_ROOT.parent / "vla4desk" / "src"
 if _VLA4DESK_SRC.is_dir() and str(_VLA4DESK_SRC) not in sys.path:
     sys.path.insert(0, str(_VLA4DESK_SRC))
@@ -78,7 +82,7 @@ def main() -> None:
     parser.add_argument(
         "--json",
         type=Path,
-        default=Path("/media/czl/sata/franka_my_code/vla4desk/collected/simple_pick_place/epo_1/data.json"),
+        default=Path(default_vla4desk_example_data_json()),
         help="Optional data.json; uses random rotvecs if missing",
     )
     parser.add_argument("--max-samples", type=int, default=30)

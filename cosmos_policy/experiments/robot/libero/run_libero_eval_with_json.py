@@ -21,7 +21,7 @@ Records actions and value predictions per timestep to JSON files.
 
 Usage:
     export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN to your Hugging Face access token}"
-    HF_HOME=/media/czl/sata/franka_my_code/cosmos-policy/hf_cache \
+    HF_HOME=./hf_cache \
     uv run --extra cu128 --group libero --python 3.10 \
         python -m cosmos_policy.experiments.robot.libero.run_libero_eval_with_json \
         --config cosmos_predict2_2b_480p_libero__inference_only \

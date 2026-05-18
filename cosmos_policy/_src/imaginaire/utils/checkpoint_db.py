@@ -910,20 +910,66 @@ def get_checkpoint_by_s3(checkpoint_s3: str) -> CheckpointConfig:
     return _CHECKPOINTS_BY_S3[checkpoint_s3]
 
 
-@functools.lru_cache
-def get_checkpoint_by_hf(checkpoint_hf: str) -> str:
-    """Download checkpoint from HuggingFace and return local path."""
-    # Parse hf://org/repo/path/to/file.pth
+def _is_hf_hub_offline() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes")
+
+
+def _hf_home_dir() -> str:
+    if os.environ.get("HF_HOME"):
+        return os.environ["HF_HOME"]
+    from cosmos_policy.config.output_paths import default_hf_home
+
+    return default_hf_home()
+
+
+def _parse_hf_uri(checkpoint_hf: str) -> tuple[str, str]:
+    """Parse hf://org/repo/path/to/file.pth into (repo_id, filename)."""
     assert checkpoint_hf.startswith("hf://"), f"Not a HuggingFace URI: {checkpoint_hf}"
-    hf_path = checkpoint_hf[5:]  # Remove "hf://" prefix
-    # Split into repo_id (org/repo) and filename (path/to/file.pth)
+    hf_path = checkpoint_hf[5:]
     parts = hf_path.split("/")
     if len(parts) < 3:
         raise ValueError(
             f"Invalid HuggingFace URI format: {checkpoint_hf}. Expected format: hf://org/repo/path/to/file.pth"
         )
-    repo_id = "/".join(parts[:2])  # org/repo
-    filename = "/".join(parts[2:])  # path/to/file.pth
+    return "/".join(parts[:2]), "/".join(parts[2:])
+
+
+def _find_hf_file_in_cache(repo_id: str, filename: str) -> str | None:
+    """Find a model file under HF_HOME (supports hub/ and legacy cache layouts)."""
+    basename = os.path.basename(filename)
+    repo_slug = repo_id.replace("/", "--")
+    search_roots = [
+        os.path.join(_hf_home_dir(), "hub", f"models--{repo_slug}"),
+        os.path.join(_hf_home_dir(), f"models--{repo_slug}"),
+    ]
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            if basename in filenames:
+                path = os.path.join(dirpath, basename)
+                if os.path.isfile(path):
+                    return path
+    return None
+
+
+@functools.lru_cache
+def get_checkpoint_by_hf(checkpoint_hf: str) -> str:
+    """Download checkpoint from HuggingFace and return local path."""
+    repo_id, filename = _parse_hf_uri(checkpoint_hf)
+
+    cached = _find_hf_file_in_cache(repo_id, filename)
+    if cached is not None:
+        log.info(f"Using cached HuggingFace checkpoint: {cached}")
+        return cached
+
+    if _is_hf_hub_offline():
+        raise FileNotFoundError(
+            f"HF_HUB_OFFLINE is set but {filename} for {repo_id} was not found under HF_HOME={_hf_home_dir()}. "
+            "Download the file once while online, or place it under HF_HOME and retry, or pass "
+            "checkpoint.load_path=/absolute/path/to/file.pt on the command line."
+        )
+
     log.info(f"Downloading checkpoint from HuggingFace: {repo_id}/{filename}")
     path = hf_hub_download(
         repo_id=repo_id,
