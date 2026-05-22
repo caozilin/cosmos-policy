@@ -112,6 +112,9 @@ import os
 import time
 import traceback
 from collections import deque
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional

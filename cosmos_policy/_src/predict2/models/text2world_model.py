@@ -210,14 +210,6 @@ class DiffusionModel(ImaginaireModel):
         with misc.timer("Creating PyTorch model"):
             with torch.device(init_device):
                 net = lazy_instantiate(config.net)
-                if config.use_lora:
-                    self.add_lora(
-                        net,
-                        lora_rank=config.lora_rank,
-                        lora_alpha=config.lora_alpha,
-                        lora_target_modules=config.lora_target_modules,
-                        init_lora_weights=config.init_lora_weights,
-                    )
 
             self._param_count = count_params(net, verbose=False)
 
@@ -229,6 +221,16 @@ class DiffusionModel(ImaginaireModel):
                 net.to_empty(device="cuda")
                 # IMPORTANT: (qsh) model init should not depends on current tensor shape, or it can handle Dtensor shape.
                 net.init_weights()
+
+                # Inject LoRA after base init_weights + to_empty so PEFT init (A~N(0), B=0) is not wiped.
+                if config.use_lora:
+                    self.add_lora(
+                        net,
+                        lora_rank=config.lora_rank,
+                        lora_alpha=config.lora_alpha,
+                        lora_target_modules=config.lora_target_modules,
+                        init_lora_weights=config.init_lora_weights,
+                    )
 
             if self.fsdp_device_mesh:
                 broadcast_dtensor_model_states(net, self.fsdp_device_mesh)
