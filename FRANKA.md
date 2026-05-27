@@ -246,4 +246,19 @@ experiment="cosmos_predict2_2b_480p_vla4desk_franka_135_demos" \
 
 ## 推理
 
-（待补充）训练产物为 DCP 目录 `checkpoints/<job.name>/checkpoints/iter_XXXXX/model/`。推理配置名：`cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only`。
+训练产物为 DCP 目录 `checkpoints/<job.name>/checkpoints/iter_XXXXX/model/`。推理配置名：`cosmos_predict2_2b_480p_vla4desk_franka_135_demos_lora__inference_only`。
+
+### 与 vla4desk 联机（OpenPI WebSocket 协议）
+
+在 **GPU 远端**启动桥接服务（vla4desk 仍发 openpi 格式 obs，服务端转 Cosmos）：
+
+```bash
+cd <cosmos-policy 仓库根>
+uv run --extra cu128 --python 3.10 python scripts/serve_vla4desk_openpi_ws.py \
+  --lora-run my_franka_lora_1gpu_3 \
+  --port 8000
+```
+
+**本地 vla4desk**：`coordinator.py` 默认 `replan_steps=16`、`action_transform=False`；`start_vla4desk.sh` 的 `--host` 指向该 GPU 即可。无需改 `franka_env.get_observation`。
+
+备份：`vla4desk/src/vla_control/coordinator.py.bak` 为修改前副本。
