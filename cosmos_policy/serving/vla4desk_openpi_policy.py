@@ -10,7 +10,14 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from cosmos_policy.experiments.robot.cosmos_utils import get_action, get_model, init_t5_text_embeddings_cache, load_dataset_stats
+from cosmos_policy.constants import PROPRIO_DIM
+from cosmos_policy.experiments.robot.cosmos_utils import (
+    extract_action_chunk_from_latent_sequence,
+    get_action,
+    get_model,
+    init_t5_text_embeddings_cache,
+    load_dataset_stats,
+)
 from cosmos_policy.serving.base_policy import BasePolicy
 
 logger = logging.getLogger(__name__)
@@ -56,6 +63,25 @@ def actions_to_openpi_array(actions) -> np.ndarray:
     if arr.ndim != 2 or arr.shape[1] != 7:
         raise ValueError(f"Expected actions with shape (H, 7), got {arr.shape}")
     return arr
+
+
+def extract_predicted_future_proprio(result: dict) -> np.ndarray | None:
+    """Extract predicted future proprio as a flat (9,) vector."""
+    if "generated_latent" not in result or "latent_indices" not in result:
+        return None
+    future_idx = result["latent_indices"].get("future_proprio_latent_idx", -1)
+    if future_idx is None or int(future_idx) < 0:
+        return None
+
+    latent = result["generated_latent"]
+    device = latent.device
+    batch_size = latent.shape[0]
+    indices = torch.full((batch_size,), int(future_idx), dtype=torch.int64, device=device)
+    chunk = extract_action_chunk_from_latent_sequence(
+        latent, action_shape=(1, PROPRIO_DIM), action_indices=indices
+    )
+    return chunk[0, 0].detach().float().cpu().numpy().astype(np.float32)
+
 
 
 @dataclass
@@ -130,7 +156,24 @@ class Vla4deskOpenPIBridgePolicy(BasePolicy):
                 generate_future_state_and_value_in_parallel=True,
             )
         actions = actions_to_openpi_array(result["actions"])
-        return {"actions": actions}
+        future_proprio = extract_predicted_future_proprio(result)
+
+        response = {
+            "actions": actions,
+            "proprio": result["proprio"].tolist(),
+            "future_proprio": future_proprio.tolist() if future_proprio is not None else None,
+            "value_prediction": result.get("value_prediction"),
+        }
+
+        future_images = result.get("future_image_predictions")
+        if future_images:
+            response["future_images"] = {
+                k: v.tolist() if hasattr(v, "tolist") else v
+                for k, v in future_images.items()
+                if v is not None
+            }
+
+        return response
 
     def reset(self) -> None:
         pass
